@@ -136,9 +136,9 @@ impl Cpu {
             // Keep them explicit until their instruction families are implemented.
             0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // SBCD
             0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // ABCD
-            0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // SUBX
-            0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // ADDX
-            0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => Err(CpuError::UnimplementedOpcode { opcode }), // CMPM
+            0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, false),
+            0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, true),
+            0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => self.exec_cmpm(bus, opcode),
             0xc140..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => Err(CpuError::UnimplementedOpcode { opcode }), // EXG
             0x80c0..=0x80ff | 0x81c0..=0x81ff => Err(CpuError::UnimplementedOpcode { opcode }), // DIVU/DIVS
             0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => Err(CpuError::UnimplementedOpcode { opcode }), // MULU/MULS
@@ -620,6 +620,65 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_addx_subx<B: Bus>(&mut self, bus: &mut B, opcode: u16, add: bool) -> Result<u32, CpuError> {
+        let size_bits = (opcode >> 6) & 3;
+        let size = decode_size(size_bits).ok_or(CpuError::UnimplementedOpcode { opcode })?;
+        let dst_reg = ((opcode >> 9) & 7) as usize;
+        let src_reg = (opcode & 7) as usize;
+        let memory = opcode & 0x0008 != 0;
+        let x = if self.sr & CCR_X != 0 { 1u64 } else { 0 };
+        let (src, dst, src_addr, dst_addr) = if memory {
+            self.a[src_reg] = self.a[src_reg].wrapping_sub(size.bytes(src_reg)) & 0x00ff_ffff;
+            let sa = self.a[src_reg];
+            self.a[dst_reg] = self.a[dst_reg].wrapping_sub(size.bytes(dst_reg)) & 0x00ff_ffff;
+            let da = self.a[dst_reg];
+            (self.read_mem(bus, size, sa)?, self.read_mem(bus, size, da)?, Some(sa), Some(da))
+        } else {
+            (self.d[src_reg] & size.mask(), self.d[dst_reg] & size.mask(), None, None)
+        };
+        let mask = size.mask() as u64;
+        let sign = size.sign();
+        let old_z = self.sr & CCR_Z != 0;
+        let (result, carry, overflow) = if add {
+            let wide = dst as u64 + src as u64 + x;
+            let r = (wide & mask) as u32;
+            let ov = (!(dst ^ src) & (dst ^ r) & sign) != 0;
+            (r, wide > mask, ov)
+        } else {
+            let subtrahend = src as u64 + x;
+            let r = (dst as u64).wrapping_sub(subtrahend) as u32 & size.mask();
+            let ov = ((dst ^ src) & (dst ^ r) & sign) != 0;
+            (r, (dst as u64) < subtrahend, ov)
+        };
+        self.sr &= !(CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C);
+        if result & sign != 0 { self.sr |= CCR_N; }
+        if result == 0 && old_z { self.sr |= CCR_Z; }
+        if overflow { self.sr |= CCR_V; }
+        if carry { self.sr |= CCR_C | CCR_X; }
+        if let Some(address) = dst_addr {
+            self.write_mem(bus, size, address, result)?;
+        } else {
+            let mask32 = size.mask();
+            self.d[dst_reg] = (self.d[dst_reg] & !mask32) | result;
+        }
+        let _ = src_addr;
+        Ok(if memory { 18 } else if size == Size::Long { 8 } else { 4 })
+    }
+
+    fn exec_cmpm<B: Bus>(&mut self, bus: &B, opcode: u16) -> Result<u32, CpuError> {
+        let size = decode_size((opcode >> 6) & 3).ok_or(CpuError::UnimplementedOpcode { opcode })?;
+        let dst_reg = ((opcode >> 9) & 7) as usize;
+        let src_reg = (opcode & 7) as usize;
+        let src_addr = self.a[src_reg];
+        let src = self.read_mem(bus, size, src_addr)?;
+        self.a[src_reg] = self.a[src_reg].wrapping_add(size.bytes(src_reg)) & 0x00ff_ffff;
+        let dst_addr = self.a[dst_reg];
+        let dst = self.read_mem(bus, size, dst_addr)?;
+        self.a[dst_reg] = self.a[dst_reg].wrapping_add(size.bytes(dst_reg)) & 0x00ff_ffff;
+        self.alu_sub(size, dst, src, false);
+        Ok(12)
     }
 
     fn resolve_rmw<B: Bus>(&mut self, bus: &B, size: Size, mode: u8, reg: usize) -> Result<RmwTarget, CpuError> {
@@ -1480,13 +1539,67 @@ mod tests {
     }
 
     #[test]
+    fn addx_and_subx_use_extend_and_sticky_zero() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xd101).unwrap(); // ADDX.B D1,D0
+        bus.write16(0x102, 0x9101).unwrap(); // SUBX.B D1,D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0xff;
+        cpu.d[1] = 0;
+        cpu.sr = CCR_X | CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_ne!(cpu.sr & CCR_Z, 0);
+        cpu.d[1] = 0;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0xff);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_eq!(cpu.sr & CCR_Z, 0);
+    }
+
+    #[test]
+    fn addx_memory_predecrements_each_operand_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xd109).unwrap(); // ADDX.B -(A1),-(A0)
+        bus.write8(0x4ff, 2).unwrap();
+        bus.write8(0x5ff, 3).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.a[1] = 0x600;
+        cpu.sr = 0;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[0], 0x4ff);
+        assert_eq!(cpu.a[1], 0x5ff);
+        assert_eq!(bus.read8(0x4ff).unwrap(), 5);
+    }
+
+    #[test]
+    fn cmpm_postincrements_both_operands_and_preserves_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xb149).unwrap(); // CMPM.W (A1)+,(A0)+
+        bus.write16(0x500, 0x1234).unwrap();
+        bus.write16(0x600, 0x1234).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.a[1] = 0x600;
+        cpu.sr = CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[0], 0x502);
+        assert_eq!(cpu.a[1], 0x602);
+        assert_ne!(cpu.sr & CCR_Z, 0);
+        assert_ne!(cpu.sr & CCR_X, 0);
+    }
+
+
+    #[test]
     fn overlapping_alu_encodings_do_not_execute_as_generic_operations() {
         for opcode in [
             0x8100u16, // SBCD D0,D0
             0xc100,    // ABCD D0,D0
-            0x9100,    // SUBX.B D0,D0
-            0xd100,    // ADDX.B D0,D0
-            0xb108,    // CMPM.B (A0)+,(A0)+
             0xc140,    // EXG D0,D0
             0x80c0,    // DIVU.W D0,D0
             0x81c0,    // DIVS.W D0,D0
