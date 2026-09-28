@@ -46,8 +46,17 @@ mod tests {
             version: Replay::FORMAT_VERSION,
             initial: seed.snapshot(),
             inputs: vec![
-                TimedInput { cycle: 100, event: InputEvent::SerialRx(42) },
-                TimedInput { cycle: 250, event: InputEvent::Key { code: 1, pressed: true } },
+                TimedInput {
+                    cycle: 100,
+                    event: InputEvent::SerialRx(42),
+                },
+                TimedInput {
+                    cycle: 250,
+                    event: InputEvent::Key {
+                        code: 1,
+                        pressed: true,
+                    },
+                },
             ],
             end_cycle: 1_000,
         };
