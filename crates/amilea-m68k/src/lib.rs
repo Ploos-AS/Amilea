@@ -68,13 +68,33 @@ impl Cpu {
         };
 
         match opcode {
+            0x41c0..=0x4fc0 if opcode & 0x01c0 == 0x01c0 => {
+                let dst = ((opcode >> 9) & 7) as usize;
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                self.a[dst] = self.ea_address(bus, mode, reg)?;
+                Ok(4)
+            }
             0x1000..=0x3fff => {
                 let size = match opcode >> 12 { 1 => Size::Byte, 2 => Size::Long, 3 => Size::Word, _ => unreachable!() };
                 let src_mode = ((opcode >> 3) & 7) as u8;
                 let src_reg = (opcode & 7) as usize;
                 let dst_mode = ((opcode >> 6) & 7) as u8;
                 let dst_reg = ((opcode >> 9) & 7) as usize;
-                if dst_mode == 1 || (size == Size::Byte && src_mode == 1) {
+                if dst_mode == 1 {
+                    if size == Size::Byte {
+                        self.enter_exception(bus, 4, instruction_pc)?;
+                        return Ok(34);
+                    }
+                    let value = self.read_ea(bus, size, src_mode, src_reg)?;
+                    self.a[dst_reg] = if size == Size::Word {
+                        value as u16 as i16 as i32 as u32
+                    } else {
+                        value
+                    };
+                    return Ok(4);
+                }
+                if size == Size::Byte && src_mode == 1 {
                     self.enter_exception(bus, 4, instruction_pc)?;
                     return Ok(34);
                 }
@@ -188,6 +208,41 @@ impl Cpu {
         Ok(())
     }
 
+    fn indexed_address<B: Bus>(&mut self, bus: &B, base: u32) -> Result<u32, CpuError> {
+        let extension = self.fetch16(bus)?;
+        let index_reg = ((extension >> 12) & 7) as usize;
+        let index = if extension & 0x8000 != 0 { self.a[index_reg] } else { self.d[index_reg] };
+        let index = if extension & 0x0800 != 0 { index } else { index as u16 as i16 as i32 as u32 };
+        let displacement = extension as u8 as i8 as i32;
+        Ok(add_displacement(base.wrapping_add(index) & 0x00ff_ffff, displacement))
+    }
+
+    fn ea_address<B: Bus>(&mut self, bus: &B, mode: u8, reg: usize) -> Result<u32, CpuError> {
+        Ok(match mode {
+            2 => self.a[reg],
+            5 => {
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                add_displacement(self.a[reg], displacement)
+            }
+            6 => {
+                let base = self.a[reg];
+                self.indexed_address(bus, base)?
+            }
+            7 if reg == 0 => self.fetch16(bus)? as i16 as i32 as u32 & 0x00ff_ffff,
+            7 if reg == 1 => self.fetch32(bus)? & 0x00ff_ffff,
+            7 if reg == 2 => {
+                let base = self.pc;
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                add_displacement(base, displacement)
+            }
+            7 if reg == 3 => {
+                let base = self.pc;
+                self.indexed_address(bus, base)?
+            }
+            _ => return Err(BusError::Unmapped { address: self.pc }.into()),
+        })
+    }
+
     fn read_ea<B: Bus>(&mut self, bus: &B, size: Size, mode: u8, reg: usize) -> Result<u32, CpuError> {
         let value = match mode {
             0 => self.d[reg] & size.mask(),
@@ -208,6 +263,11 @@ impl Cpu {
                 let address = add_displacement(self.a[reg], displacement);
                 self.read_mem(bus, size, address)?
             }
+            6 => {
+                let base = self.a[reg];
+                let address = self.indexed_address(bus, base)?;
+                self.read_mem(bus, size, address)?
+            }
             7 if reg == 0 => {
                 let address = self.fetch16(bus)? as i16 as i32 as u32 & 0x00ff_ffff;
                 self.read_mem(bus, size, address)?
@@ -216,6 +276,21 @@ impl Cpu {
                 let address = self.fetch32(bus)? & 0x00ff_ffff;
                 self.read_mem(bus, size, address)?
             }
+            7 if reg == 2 => {
+                let base = self.pc;
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                self.read_mem(bus, size, add_displacement(base, displacement))?
+            }
+            7 if reg == 3 => {
+                let base = self.pc;
+                let address = self.indexed_address(bus, base)?;
+                self.read_mem(bus, size, address)?
+            }
+            7 if reg == 4 => match size {
+                Size::Byte => self.fetch16(bus)? as u8 as u32,
+                Size::Word => self.fetch16(bus)? as u32,
+                Size::Long => self.fetch32(bus)?,
+            },
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         };
         Ok(value)
@@ -463,6 +538,51 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read16(0x508).unwrap(), 0xbeef);
         assert_eq!(cpu.pc, 0x106);
+    }
+
+    #[test]
+    fn move_immediate_and_movea_word_work() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x203c).unwrap(); // MOVE.L #imm,D0
+        bus.write32(0x102, 0x1234_5678).unwrap();
+        bus.write16(0x106, 0x327c).unwrap(); // MOVEA.W #$ff00,A1
+        bus.write16(0x108, 0xff00).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0x1234_5678);
+        assert_eq!(cpu.a[1], 0xffff_ff00);
+    }
+
+    #[test]
+    fn pc_relative_and_indexed_sources_work() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x303a).unwrap(); // MOVE.W d16(PC),D0
+        bus.write16(0x102, 0x000c).unwrap(); // base 0x102 -> 0x10e
+        bus.write16(0x104, 0x3230).unwrap(); // MOVE.W d8(A0,D1.W),D1
+        bus.write16(0x106, 0x1004).unwrap(); // D1.W + 4
+        bus.write16(0x10e, 0x1234).unwrap();
+        bus.write16(0x506, 0xabcd).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.d[1] = 2;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xffff, 0x1234);
+        assert_eq!(cpu.d[1] & 0xffff, 0xabcd);
+    }
+
+    #[test]
+    fn lea_pc_relative_calculates_address_without_reading_operand() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x43fa).unwrap(); // LEA d16(PC),A1
+        bus.write16(0x102, 0x0010).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[1], 0x112);
     }
 
     #[test]
