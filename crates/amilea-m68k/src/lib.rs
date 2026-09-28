@@ -85,22 +85,39 @@ impl Cpu {
                 self.set_logic_flags(size, value);
                 Ok(4)
             }
-            0x9000..=0x9fff | 0xb000..=0xbfff | 0xd000..=0xdfff => {
+            0x8000..=0x8fff | 0x9000..=0x9fff | 0xb000..=0xbfff | 0xc000..=0xcfff | 0xd000..=0xdfff => {
                 let top = opcode >> 12;
                 let opmode = ((opcode >> 6) & 7) as u8;
                 let dn = ((opcode >> 9) & 7) as usize;
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+
+                if matches!(top, 0x9 | 0xb | 0xd) && matches!(opmode, 3 | 7) {
+                    let size = if opmode == 3 { Size::Word } else { Size::Long };
+                    let raw = self.read_ea(bus, size, mode, reg)?;
+                    let src = if size == Size::Word { raw as u16 as i16 as i32 as u32 } else { raw };
+                    if top == 0xb {
+                        self.alu_sub(Size::Long, self.a[dn], src, false);
+                    } else if top == 0x9 {
+                        self.a[dn] = self.a[dn].wrapping_sub(src);
+                    } else {
+                        self.a[dn] = self.a[dn].wrapping_add(src);
+                    }
+                    return Ok(4);
+                }
+
                 if opmode > 2 {
                     self.enter_exception(bus, 4, instruction_pc)?;
                     return Ok(34);
                 }
                 let size = decode_size(opmode as u16).unwrap();
-                let mode = ((opcode >> 3) & 7) as u8;
-                let reg = (opcode & 7) as usize;
                 let src = self.read_ea(bus, size, mode, reg)?;
                 let dst = self.d[dn] & size.mask();
                 let result = match top {
+                    0x8 => { let r = dst | src; self.set_logic_flags(size, r); r }
                     0x9 => self.alu_sub(size, dst, src, true),
                     0xb => self.alu_sub(size, dst, src, false),
+                    0xc => { let r = dst & src; self.set_logic_flags(size, r); r }
                     0xd => self.alu_add(size, dst, src),
                     _ => unreachable!(),
                 };
@@ -710,6 +727,55 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_ne!(cpu.sr & CCR_Z, 0);
         assert_ne!(cpu.sr & CCR_X, 0);
+    }
+
+    #[test]
+    fn address_arithmetic_sign_extends_word_without_changing_ccr() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xd2fc).unwrap(); // ADDA.W #$ffff,A1
+        bus.write16(0x102, 0xffff).unwrap();
+        bus.write16(0x104, 0x95fc).unwrap(); // SUBA.W #1,A2
+        bus.write16(0x106, 1).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[1] = 0x1000;
+        cpu.a[2] = 0x1000;
+        let sr = cpu.sr;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[1], 0x0fff);
+        assert_eq!(cpu.a[2], 0x0fff);
+        assert_eq!(cpu.sr, sr);
+    }
+
+    #[test]
+    fn cmpa_sets_long_flags_and_does_not_modify_address_register() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xb3fc).unwrap(); // CMPA.W #$ffff,A1
+        bus.write16(0x102, 0xffff).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[1] = 0xffff_ffff;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[1], 0xffff_ffff);
+        assert_ne!(cpu.sr & CCR_Z, 0);
+    }
+
+    #[test]
+    fn or_and_update_data_register_and_logic_flags() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x8001).unwrap(); // OR.B D1,D0
+        bus.write16(0x102, 0xc001).unwrap(); // AND.B D1,D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0xf0;
+        cpu.d[1] = 0x0f;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0xff);
+        assert_ne!(cpu.sr & CCR_N, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x0f);
+        assert_eq!(cpu.sr & (CCR_N | CCR_Z | CCR_V | CCR_C), 0);
     }
 
     #[test]
