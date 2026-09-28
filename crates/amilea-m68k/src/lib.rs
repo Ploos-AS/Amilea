@@ -211,6 +211,63 @@ impl Cpu {
                 self.set_move_flags(size, value);
                 Ok(4)
             }
+            0x4840..=0x4847 => {
+                let reg = (opcode & 7) as usize;
+                self.d[reg] = self.d[reg].rotate_left(16);
+                self.set_logic_flags(Size::Long, self.d[reg]);
+                Ok(4)
+            }
+            0x4848..=0x487f => {
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let address = self.ea_address(bus, mode, reg)?;
+                self.push32(bus, address)?;
+                Ok(12)
+            }
+            0x4880..=0x4887 => {
+                let reg = (opcode & 7) as usize;
+                let value = self.d[reg] as u8 as i8 as i16 as u16 as u32;
+                self.d[reg] = (self.d[reg] & 0xffff_0000) | value;
+                self.set_logic_flags(Size::Word, value);
+                Ok(4)
+            }
+            0x48c0..=0x48c7 => {
+                let reg = (opcode & 7) as usize;
+                let value = self.d[reg] as u16 as i16 as i32 as u32;
+                self.d[reg] = value;
+                self.set_logic_flags(Size::Long, value);
+                Ok(4)
+            }
+            0x4e50..=0x4e57 => {
+                let reg = (opcode & 7) as usize;
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                let old = self.a[reg];
+                self.push32(bus, old)?;
+                self.a[reg] = self.a[7];
+                self.a[7] = add_displacement(self.a[7], displacement);
+                Ok(16)
+            }
+            0x4e58..=0x4e5f => {
+                let reg = (opcode & 7) as usize;
+                self.a[7] = self.a[reg];
+                self.a[reg] = self.pop32(bus)?;
+                Ok(12)
+            }
+            0x4e80..=0x4ebf => {
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let target = self.ea_address(bus, mode, reg)?;
+                let return_pc = self.pc;
+                self.push32(bus, return_pc)?;
+                self.pc = target;
+                Ok(16)
+            }
+            0x4ec0..=0x4eff => {
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                self.pc = self.ea_address(bus, mode, reg)?;
+                Ok(8)
+            }
             0x4e71 => Ok(4),
             0x4e75 => { self.pc = self.pop32(bus)?; Ok(16) }
             0x4e73 => {
@@ -227,13 +284,6 @@ impl Cpu {
                 let vector = 32 + (opcode & 0x000f) as u8;
                 self.enter_exception(bus, vector, self.pc)?;
                 Ok(34)
-            }
-            0x4eb9 => {
-                let target = self.fetch32(bus)? & 0x00ff_ffff;
-                let return_pc = self.pc;
-                self.push32(bus, return_pc)?;
-                self.pc = target;
-                Ok(20)
             }
             0x6000..=0x6fff => {
                 let condition = ((opcode >> 8) & 0x0f) as u8;
@@ -1004,6 +1054,75 @@ mod tests {
         cpu.sr = CCR_N;
         assert!(cpu.condition_true(13)); // LT
         assert!(cpu.condition_true(15)); // LE
+    }
+
+    #[test]
+    fn jsr_and_jmp_use_general_control_addressing() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4e90).unwrap(); // JSR (A0)
+        bus.write16(0x200, 0x4ed1).unwrap(); // JMP (A1)
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x200;
+        cpu.a[1] = 0x300;
+        let sp = cpu.a[7];
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x200);
+        assert_eq!(bus.read32(sp - 4).unwrap(), 0x102);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x300);
+    }
+
+    #[test]
+    fn link_and_unlk_create_and_remove_stack_frame() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4e56).unwrap(); // LINK A6,#-16
+        bus.write16(0x102, 0xfff0).unwrap();
+        bus.write16(0x104, 0x4e5e).unwrap(); // UNLK A6
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[6] = 0x1234;
+        let sp = cpu.a[7];
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[6], sp - 4);
+        assert_eq!(cpu.a[7], sp - 20);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[6], 0x1234);
+        assert_eq!(cpu.a[7], sp);
+    }
+
+    #[test]
+    fn pea_pushes_effective_address_not_contents() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4868).unwrap(); // PEA 8(A0)
+        bus.write16(0x102, 8).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        let sp = cpu.a[7];
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read32(sp - 4).unwrap(), 0x508);
+    }
+
+    #[test]
+    fn swap_and_ext_update_nzvc_and_preserve_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4840).unwrap(); // SWAP D0
+        bus.write16(0x102, 0x4881).unwrap(); // EXT.W D1
+        bus.write16(0x104, 0x48c1).unwrap(); // EXT.L D1
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr |= CCR_X;
+        cpu.d[0] = 0x1234_8000;
+        cpu.d[1] = 0x0000_0080;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0x8000_1234);
+        assert_ne!(cpu.sr & CCR_N, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[1] & 0xffff, 0xff80);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[1], 0xffff_ff80);
+        assert_ne!(cpu.sr & CCR_X, 0);
     }
 
     #[test]
