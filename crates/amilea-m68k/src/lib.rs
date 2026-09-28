@@ -42,6 +42,8 @@ pub enum CpuError {
     UnimplementedOpcode { opcode: u16 },
     #[error("68000 data access fault: {fault}")]
     DataAccess { fault: BusError, read: bool },
+    #[error("illegal 68000 opcode {opcode:#06x}")]
+    IllegalOpcode { opcode: u16 },
 }
 
 impl Default for Cpu {
@@ -183,7 +185,7 @@ impl Cpu {
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
                 if mode == 1 || (mode == 7 && reg > 4) {
-                    return Err(CpuError::UnimplementedOpcode { opcode });
+                    return Err(CpuError::IllegalOpcode { opcode });
                 }
                 let bound = self.read_ea(bus, Size::Word, mode, reg)? as u16 as i16 as i32;
                 let value = self.d[dn] as u16 as i16 as i32;
@@ -548,6 +550,10 @@ impl Cpu {
                 self.enter_access_fault(bus, vector, instruction_pc, opcode, address, read, false)?;
                 Ok(50)
             }
+            Err(CpuError::IllegalOpcode { .. }) => {
+                self.enter_exception(bus, 4, instruction_pc)?;
+                Ok(34)
+            }
             other => other,
         }
     }
@@ -816,7 +822,7 @@ impl Cpu {
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
         if mode < 2 || (mode == 7 && reg > 1) {
-            return Err(CpuError::UnimplementedOpcode { opcode });
+            return Err(CpuError::IllegalOpcode { opcode });
         }
         let target = self.resolve_rmw(bus, Size::Word, mode, reg)?;
         let value = self.read_rmw(bus, Size::Word, target)? & 0xffff;
@@ -908,7 +914,7 @@ impl Cpu {
 
     fn exec_bit_op<B: Bus>(&mut self, bus: &mut B, operation: u8, mode: u8, reg: usize, bit: u32) -> Result<u32, CpuError> {
         if mode == 1 || (mode == 7 && (reg >= 4 || operation != 0 && reg >= 2)) {
-            return Err(CpuError::UnimplementedOpcode { opcode: 0 });
+            return Err(CpuError::IllegalOpcode { opcode: 0 });
         }
         if mode == 0 {
             let mask = 1u32 << (bit & 31);
@@ -1007,7 +1013,7 @@ impl Cpu {
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
         if mode == 1 || (mode == 7 && reg > 4) {
-            return Err(CpuError::UnimplementedOpcode { opcode });
+            return Err(CpuError::IllegalOpcode { opcode });
         }
         let divisor_raw = self.read_ea(bus, Size::Word, mode, reg)? as u16;
         if divisor_raw == 0 {
@@ -1056,7 +1062,7 @@ impl Cpu {
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
         if mode == 1 || (mode == 7 && reg > 4) {
-            return Err(CpuError::UnimplementedOpcode { opcode });
+            return Err(CpuError::IllegalOpcode { opcode });
         }
         let src = self.read_ea(bus, Size::Word, mode, reg)? as u16;
         let result = if signed {
@@ -1923,12 +1929,28 @@ mod tests {
 
 
     #[test]
+    fn illegal_family_encoding_enters_vector_four_while_unimplemented_stays_host_error() {
+        let mut bus = boot_bus();
+        bus.write32(4 * 4, 0x240).unwrap();
+        bus.write16(0x100, 0xc0c8).unwrap(); // MULU.W A0,D0: illegal EA
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x240);
+
+        bus.write16(0x100, 0x4e74).unwrap(); // RTD: not a 68000 instruction implemented by this core
+        cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        assert!(matches!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e74 })));
+    }
+
+
+    #[test]
     fn mul_div_and_chk_reject_address_register_direct_sources() {
         let mut bus = boot_bus();
         for opcode in [0xc0c8u16, 0x80c8, 0x4188] {
             bus.write16(0x100, opcode).unwrap();
             let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
-            assert!(matches!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { .. })));
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.pc, bus.read32(4 * 4).unwrap());
         }
     }
 
@@ -1944,7 +1966,8 @@ mod tests {
         bus.write16(0x100, 0x08fa).unwrap(); // BSET #0,(d16,PC): not alterable
         bus.write16(0x102, 0).unwrap();
         cpu = Cpu::default(); cpu.reset(&bus).unwrap();
-        assert!(matches!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { .. })));
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, bus.read32(4 * 4).unwrap());
     }
 
 
