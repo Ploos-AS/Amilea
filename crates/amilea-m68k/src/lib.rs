@@ -81,6 +81,8 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x4840..=0x4847 => (Alu, "SWAP"),
         0x4880..=0x4887 => (Alu, "EXT.W"),
         0x48c0..=0x48c7 => (Alu, "EXT.L"),
+        0x4880..=0x48ff => (Move, "MOVEM-RM"),
+        0x4c80..=0x4cff => (Move, "MOVEM-MR"),
         0x4e50..=0x4e57 => (Control, "LINK"),
         0x4e58..=0x4e5f => (Control, "UNLK"),
         0x4000..=0x4fff if opcode & 0xf1c0 == 0x4180 => (System, "CHK"),
@@ -124,6 +126,14 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
         }
+        "MOVEM-RM" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::FamilySpecific, if legal_movem_to_memory(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
+        "MOVEM-MR" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::FamilySpecific, if legal_movem_from_memory(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
         "SWAP" | "EXT.W" | "EXT.L" | "LINK" | "UNLK" =>
             (EaPolicy::None, Legality::Legal),
         "MOVE-SR-EA" => {
@@ -150,6 +160,13 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
     };
     DecodeInfo { class, mnemonic, ea_policy, legality }
 }
+fn legal_movem_to_memory(mode: u8, reg: usize) -> bool {
+    matches!(mode, 2 | 4 | 5 | 6) || (mode == 7 && reg <= 1)
+}
+fn legal_movem_from_memory(mode: u8, reg: usize) -> bool {
+    matches!(mode, 2 | 3 | 5 | 6) || (mode == 7 && reg <= 3)
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
@@ -1508,6 +1525,25 @@ mod tests {
     }
 
     #[test]
+    fn movem_metadata_qualifies_direction_specific_eas() {
+        for ea in 0u16..64 {
+            for size_bit in [0u16, 0x0040] {
+                let to_mem = 0x4880 | size_bit | ea;
+                let from_mem = 0x4c80 | size_bit | ea;
+                let (mode, reg) = ea_mode_reg(to_mem);
+                if !matches!(to_mem, 0x4880..=0x4887 | 0x48c0..=0x48c7) {
+                    let expected = if legal_movem_to_memory(mode, reg) { Legality::Legal } else { Legality::Illegal };
+                    assert_eq!(decode_info(to_mem).mnemonic, "MOVEM-RM", "opcode {to_mem:04x}");
+                    assert_eq!(decode_info(to_mem).legality, expected, "opcode {to_mem:04x}");
+                }
+                let expected = if legal_movem_from_memory(mode, reg) { Legality::Legal } else { Legality::Illegal };
+                assert_eq!(decode_info(from_mem).mnemonic, "MOVEM-MR", "opcode {from_mem:04x}");
+                assert_eq!(decode_info(from_mem).legality, expected, "opcode {from_mem:04x}");
+            }
+        }
+    }
+
+    #[test]
     fn system_control_metadata_covers_privileged_and_illegal_core() {
         for opcode in [0x4e70u16, 0x4e71, 0x4e72, 0x4e73, 0x4e75, 0x4e76, 0x4e77, 0x4afc] {
             let info = decode_info(opcode);
@@ -1522,7 +1558,7 @@ mod tests {
 
     #[test]
     fn four_x_unknown_count_matches_m1_7_baseline() {
-        const EXPECTED_UNKNOWN: usize = 1529;
+        const EXPECTED_UNKNOWN: usize = 1289;
         let unknown = (0x4000u16..=0x4fff)
             .filter(|&opcode| decode_info(opcode).class == InstructionClass::Unknown)
             .count();
