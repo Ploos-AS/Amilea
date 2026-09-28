@@ -108,6 +108,57 @@ impl Cpu {
                 self.set_sr(value);
                 Ok(20)
             }
+            0x40c0..=0x40ff => {
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                self.write_ea(bus, Size::Word, mode, reg, self.sr as u32)?;
+                Ok(6)
+            }
+            0x44c0..=0x44ff => {
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let value = self.read_ea(bus, Size::Word, mode, reg)? as u16;
+                self.sr = (self.sr & 0xff00) | (value & 0x00ff);
+                Ok(12)
+            }
+            0x46c0..=0x46ff => {
+                if !self.supervisor() {
+                    self.enter_exception(bus, 8, instruction_pc)?;
+                    return Ok(34);
+                }
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let value = self.read_ea(bus, Size::Word, mode, reg)? as u16;
+                self.set_sr(value);
+                Ok(12)
+            }
+            0x4800..=0x483f => {
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let target = self.resolve_rmw(bus, Size::Byte, mode, reg)?;
+                let value = self.read_rmw(bus, Size::Byte, target)? as u8;
+                let x = if self.sr & CCR_X != 0 { 1i16 } else { 0 };
+                let low_borrow = 0i16 - (value & 0x0f) as i16 - x < 0;
+                let mut adjusted = -(value as i16) - x;
+                if low_borrow { adjusted -= 0x06; }
+                let borrow = adjusted < 0;
+                if borrow { adjusted -= 0x60; }
+                let result = adjusted as u8;
+                let old_z = self.sr & CCR_Z != 0;
+                self.sr &= !(CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C);
+                if result & 0x80 != 0 { self.sr |= CCR_N; }
+                if result == 0 && old_z { self.sr |= CCR_Z; }
+                if borrow { self.sr |= CCR_X | CCR_C; }
+                self.write_rmw(bus, Size::Byte, target, result as u32)?;
+                Ok(6)
+            }
+            0x4e77 => {
+                let ccr = self.pop16(bus)?;
+                let pc = self.pop32(bus)?;
+                self.sr = (self.sr & 0xff00) | (ccr & 0x00ff);
+                self.pc = pc;
+                Ok(20)
+            }
             0x4e70 => {
                 if !self.supervisor() {
                     self.enter_exception(bus, 8, instruction_pc)?;
@@ -1650,13 +1701,75 @@ mod tests {
 
 
     #[test]
+    fn move_sr_ccr_roundtrips_condition_codes_without_touching_upper_sr() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x40c0).unwrap(); // MOVE SR,D0
+        bus.write16(0x102, 0x44c1).unwrap(); // MOVE D1,CCR
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr = 0x2715;
+        cpu.d[1] = 0x000a;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xffff, 0x2715);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.sr, 0x270a);
+    }
+
+    #[test]
+    fn move_to_sr_is_privileged_and_uses_set_sr_stack_switching() {
+        let mut bus = boot_bus();
+        bus.write32(8 * 4, 0x280).unwrap();
+        bus.write16(0x100, 0x46c0).unwrap(); // MOVE D0,SR
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.ssp = 0x3000;
+        cpu.usp = 0x2800;
+        cpu.a[7] = cpu.usp;
+        cpu.sr = 0;
+        cpu.d[0] = 0x2700;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x280);
+    }
+
+    #[test]
+    fn nbcd_uses_extend_decimal_borrow_and_sticky_zero() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4800).unwrap(); // NBCD D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x01;
+        cpu.sr = CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x99);
+        assert_eq!(cpu.sr & (CCR_X | CCR_C), CCR_X | CCR_C);
+        assert_eq!(cpu.sr & CCR_Z, 0);
+    }
+
+    #[test]
+    fn rtr_restores_ccr_and_pc_but_preserves_upper_sr() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4e77).unwrap(); // RTR
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr = 0x2700;
+        let sp = cpu.a[7];
+        bus.write16(sp, 0x0015).unwrap();
+        bus.write32(sp + 2, 0x0000_2340).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x2340);
+        assert_eq!(cpu.sr, 0x2715);
+        assert_eq!(cpu.a[7], sp + 6);
+    }
+
+
+    #[test]
     fn unimplemented_opcode_is_host_error_not_guest_illegal() {
         let mut bus = boot_bus();
         bus.write32(4 * 4, 0x240).unwrap();
-        bus.write16(0x100, 0x4e77).unwrap(); // RTR: valid 68000, not implemented yet
+        bus.write16(0x100, 0x4e74).unwrap(); // RTD: 68010+, not implemented by this 68000 core
         let mut cpu = Cpu::default();
         cpu.reset(&bus).unwrap();
-        assert_eq!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e77 }));
+        assert_eq!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e74 }));
         assert_eq!(cpu.pc, 0x102);
     }
 
