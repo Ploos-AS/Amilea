@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoStandard {
@@ -37,9 +38,17 @@ pub enum InputEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    pub version: u32,
+    pub config: MachineConfig,
     pub cycle: u64,
     pub accumulator: u64,
     pub pending_inputs: Vec<InputEvent>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SnapshotError {
+    #[error("unsupported snapshot version {found}; expected {expected}")]
+    UnsupportedVersion { found: u32, expected: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +60,8 @@ pub struct Amilea {
 }
 
 impl Amilea {
+    pub const SNAPSHOT_VERSION: u32 = 1;
+
     pub fn new(config: MachineConfig) -> Self {
         Self {
             accumulator: seed(&config),
@@ -85,16 +96,27 @@ impl Amilea {
 
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            version: Self::SNAPSHOT_VERSION,
+            config: self.config.clone(),
             cycle: self.cycle,
             accumulator: self.accumulator,
             pending_inputs: self.pending_inputs.clone(),
         }
     }
 
-    pub fn restore(&mut self, snapshot: &Snapshot) {
+    pub fn restore(&mut self, snapshot: &Snapshot) -> Result<(), SnapshotError> {
+        if snapshot.version != Self::SNAPSHOT_VERSION {
+            return Err(SnapshotError::UnsupportedVersion {
+                found: snapshot.version,
+                expected: Self::SNAPSHOT_VERSION,
+            });
+        }
+
+        self.config = snapshot.config.clone();
         self.cycle = snapshot.cycle;
         self.accumulator = snapshot.accumulator;
         self.pending_inputs = snapshot.pending_inputs.clone();
+        Ok(())
     }
 
     /// Stable digest used by M0 determinism tests and future CI qualification.
@@ -175,14 +197,36 @@ mod tests {
         });
         original.run_cycles(500);
 
-        let mut replayed = Amilea::new(MachineConfig::default());
-        replayed.restore(&checkpoint);
+        let mut replayed = Amilea::new(MachineConfig {
+            video: VideoStandard::Ntsc,
+            chip_ram_bytes: 1024 * 1024,
+        });
+        replayed.restore(&checkpoint).unwrap();
         replayed.inject(InputEvent::Joystick {
             port: 1,
             state: 0x11,
         });
         replayed.run_cycles(500);
 
+        assert_eq!(original.config(), replayed.config());
         assert_eq!(original.state_hash(), replayed.state_hash());
+    }
+
+    #[test]
+    fn snapshot_rejects_unknown_version_without_mutating_machine() {
+        let mut machine = Amilea::new(MachineConfig::default());
+        machine.run_cycles(123);
+        let before = machine.state_hash();
+        let mut snapshot = machine.snapshot();
+        snapshot.version += 1;
+
+        assert_eq!(
+            machine.restore(&snapshot),
+            Err(SnapshotError::UnsupportedVersion {
+                found: 2,
+                expected: 1,
+            })
+        );
+        assert_eq!(before, machine.state_hash());
     }
 }
