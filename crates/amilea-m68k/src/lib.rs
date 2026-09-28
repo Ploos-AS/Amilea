@@ -1521,11 +1521,15 @@ mod tests {
     }
 
     #[test]
-    fn four_x_unknown_count_is_bounded() {
+    fn four_x_unknown_count_matches_m1_7_baseline() {
+        const EXPECTED_UNKNOWN: usize = 1529;
         let unknown = (0x4000u16..=0x4fff)
             .filter(|&opcode| decode_info(opcode).class == InstructionClass::Unknown)
             .count();
-        assert!(unknown < 2048, "too many 0x4xxx opcodes remain unknown: {unknown}");
+        assert_eq!(
+            unknown, EXPECTED_UNKNOWN,
+            "0x4xxx decode coverage changed; audit the delta and update the M1.7 baseline intentionally"
+        );
     }
 
     #[test]
