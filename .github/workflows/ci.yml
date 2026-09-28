@@ -20,4 +20,4 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --all-targets
