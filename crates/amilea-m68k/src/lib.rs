@@ -182,6 +182,9 @@ impl Cpu {
                 let dn = ((opcode >> 9) & 7) as usize;
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
+                if mode == 1 || (mode == 7 && reg > 4) {
+                    return Err(CpuError::UnimplementedOpcode { opcode });
+                }
                 let bound = self.read_ea(bus, Size::Word, mode, reg)? as u16 as i16 as i32;
                 let value = self.d[dn] as u16 as i16 as i32;
                 if value < 0 || value > bound {
@@ -904,7 +907,7 @@ impl Cpu {
     }
 
     fn exec_bit_op<B: Bus>(&mut self, bus: &mut B, operation: u8, mode: u8, reg: usize, bit: u32) -> Result<u32, CpuError> {
-        if mode == 1 || (mode == 7 && reg >= 4) {
+        if mode == 1 || (mode == 7 && (reg >= 4 || operation != 0 && reg >= 2)) {
             return Err(CpuError::UnimplementedOpcode { opcode: 0 });
         }
         if mode == 0 {
@@ -1003,6 +1006,9 @@ impl Cpu {
         let dn = ((opcode >> 9) & 7) as usize;
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
+        if mode == 1 || (mode == 7 && reg > 4) {
+            return Err(CpuError::UnimplementedOpcode { opcode });
+        }
         let divisor_raw = self.read_ea(bus, Size::Word, mode, reg)? as u16;
         if divisor_raw == 0 {
             self.enter_exception(bus, 5, instruction_pc)?;
@@ -1049,6 +1055,9 @@ impl Cpu {
         let dn = ((opcode >> 9) & 7) as usize;
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
+        if mode == 1 || (mode == 7 && reg > 4) {
+            return Err(CpuError::UnimplementedOpcode { opcode });
+        }
         let src = self.read_ea(bus, Size::Word, mode, reg)? as u16;
         let result = if signed {
             (self.d[dn] as u16 as i16 as i32).wrapping_mul(src as i16 as i32) as u32
@@ -1910,6 +1919,32 @@ mod tests {
         cpu.sr = 0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
+    fn mul_div_and_chk_reject_address_register_direct_sources() {
+        let mut bus = boot_bus();
+        for opcode in [0xc0c8u16, 0x80c8, 0x4188] {
+            bus.write16(0x100, opcode).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            assert!(matches!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { .. })));
+        }
+    }
+
+    #[test]
+    fn modifying_bit_ops_reject_pc_relative_but_btst_allows_it() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x083a).unwrap(); // BTST #0,(d16,PC)
+        bus.write16(0x102, 0).unwrap();
+        bus.write16(0x104, 0).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        assert!(cpu.step(&mut bus).is_ok());
+
+        bus.write16(0x100, 0x08fa).unwrap(); // BSET #0,(d16,PC): not alterable
+        bus.write16(0x102, 0).unwrap();
+        cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        assert!(matches!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { .. })));
     }
 
 
