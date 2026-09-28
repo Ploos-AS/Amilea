@@ -482,6 +482,7 @@ impl Cpu {
                     Ok(if short == 0 { 12 } else { 8 })
                 }
             }
+            0x5000..=0x5fff if ((opcode >> 6) & 3) != 3 => self.exec_addq_subq(bus, opcode),
             0x50c8..=0x5fcf => {
                 let condition = ((opcode >> 8) & 0x0f) as u8;
                 let reg = (opcode & 7) as usize;
@@ -742,6 +743,26 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_addq_subq<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
+        let mut quick = ((opcode >> 9) & 7) as u32;
+        if quick == 0 { quick = 8; }
+        let subtract = opcode & 0x0100 != 0;
+        let size = decode_size((opcode >> 6) & 3).ok_or(CpuError::UnimplementedOpcode { opcode })?;
+        let mode = ((opcode >> 3) & 7) as u8;
+        let reg = (opcode & 7) as usize;
+        if mode == 1 {
+            if size == Size::Byte { return Err(CpuError::UnimplementedOpcode { opcode }); }
+            self.a[reg] = if subtract { self.a[reg].wrapping_sub(quick) } else { self.a[reg].wrapping_add(quick) };
+            return Ok(8);
+        }
+        if mode == 7 && reg >= 2 { return Err(CpuError::UnimplementedOpcode { opcode }); }
+        let target = self.resolve_rmw(bus, size, mode, reg)?;
+        let dst = self.read_rmw(bus, size, target)?;
+        let result = if subtract { self.alu_sub(size, dst, quick, true) } else { self.alu_add(size, dst, quick, true) };
+        self.write_rmw(bus, size, target, result)?;
+        Ok(if mode == 0 { if size == Size::Long { 8 } else { 4 } } else { 8 })
     }
 
     fn exec_shift_memory<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
@@ -1843,6 +1864,42 @@ mod tests {
         cpu.sr = 0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
+    fn addq_subq_handle_quick_eight_and_flags() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x5000).unwrap(); // ADDQ.B #8,D0
+        bus.write16(0x102, 0x5300).unwrap(); // SUBQ.B #1,D0
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.d[0] = 0x78;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x80); assert_ne!(cpu.sr & CCR_V, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x7f); assert_ne!(cpu.sr & CCR_V, 0);
+    }
+
+    #[test]
+    fn quick_arithmetic_on_address_register_preserves_ccr() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x5248).unwrap(); // ADDQ.W #1,A0
+        bus.write16(0x102, 0x5188).unwrap(); // SUBQ.L #8,A0
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0xffff_ffff; cpu.sr = CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C;
+        let ccr = cpu.sr & 0x1f;
+        cpu.step(&mut bus).unwrap(); assert_eq!(cpu.a[0], 0); assert_eq!(cpu.sr & 0x1f, ccr);
+        cpu.step(&mut bus).unwrap(); assert_eq!(cpu.a[0], 0xffff_fff8); assert_eq!(cpu.sr & 0x1f, ccr);
+    }
+
+    #[test]
+    fn addq_memory_postincrement_resolves_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x5258).unwrap(); // ADDQ.W #1,(A0)+
+        bus.write16(0x500, 0xffff).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.a[0] = 0x500;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x500).unwrap(), 0); assert_eq!(cpu.a[0], 0x502);
+        assert_ne!(cpu.sr & CCR_Z, 0); assert_ne!(cpu.sr & (CCR_X | CCR_C), 0);
     }
 
 
