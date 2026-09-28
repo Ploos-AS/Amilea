@@ -52,6 +52,12 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x4e70 => (System, "RESET"), 0x4e71 => (System, "NOP"), 0x4e72 => (System, "STOP"),
         0x4e73 => (System, "RTE"), 0x4e75 => (Control, "RTS"), 0x4e76 => (System, "TRAPV"),
         0x4e77 => (Control, "RTR"), 0x4e40..=0x4e4f => (System, "TRAP"),
+        0x4848..=0x487f => (Control, "PEA"),
+        0x4e80..=0x4ebf => (Control, "JSR"),
+        0x4ec0..=0x4eff => (Control, "JMP"),
+        0x40c0..=0x40ff => (System, "MOVE-SR-EA"),
+        0x44c0..=0x44ff => (System, "MOVE-EA-CCR"),
+        0x46c0..=0x46ff => (System, "MOVE-EA-SR"),
         0x6000..=0x6fff => (Branch, "Bcc/BSR/BRA"),
         0x7000..=0x7fff => (Move, "MOVEQ"),
         0xe000..=0xefff => (ShiftRotate, "SHIFT/ROTATE"),
@@ -72,6 +78,18 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
     let (ea_policy, legality) = match mnemonic {
         "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "Bcc/BSR/BRA" | "MOVEQ" =>
             (EaPolicy::None, Legality::Legal),
+        "PEA" | "JSR" | "JMP" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
+        "MOVE-SR-EA" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::DataAlterable, if legal_data_alterable(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
+        "MOVE-EA-CCR" | "MOVE-EA-SR" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::DataRead, if legal_data_read(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
         "MUL" | "DIV" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::DataRead, if legal_data_read(mode, reg) { Legality::Legal } else { Legality::Illegal })
@@ -151,14 +169,14 @@ impl Cpu {
         let result = match opcode {
             0x003c | 0x023c | 0x0a3c => {
                 let immediate = self.fetch16(bus)? as u8 as u16;
-                let ccr = self.sr & 0x00ff;
+                let ccr = self.sr & 0x001f;
                 let value = match opcode {
                     0x003c => ccr | immediate,
                     0x023c => ccr & immediate,
                     0x0a3c => ccr ^ immediate,
                     _ => unreachable!(),
                 };
-                self.sr = (self.sr & 0xff00) | (value & 0x00ff);
+                self.sr = (self.sr & !0x001f) | (value & 0x001f);
                 Ok(20)
             }
             0x007c | 0x027c | 0x0a7c => {
@@ -183,14 +201,16 @@ impl Cpu {
             0x40c0..=0x40ff => {
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
+                if !legal_data_alterable(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
                 self.write_ea(bus, Size::Word, mode, reg, self.sr as u32)?;
                 Ok(6)
             }
             0x44c0..=0x44ff => {
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
+                if !legal_data_read(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
                 let value = self.read_ea(bus, Size::Word, mode, reg)? as u16;
-                self.sr = (self.sr & 0xff00) | (value & 0x00ff);
+                self.sr = (self.sr & !0x001f) | (value & 0x001f);
                 Ok(12)
             }
             0x46c0..=0x46ff => {
@@ -200,6 +220,7 @@ impl Cpu {
                 }
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
+                if !legal_data_read(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
                 let value = self.read_ea(bus, Size::Word, mode, reg)? as u16;
                 self.set_sr(value);
                 Ok(12)
@@ -1415,6 +1436,29 @@ mod tests {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
         }
+    }
+
+    #[test]
+    fn control_metadata_matches_shared_control_policy() {
+        for base in [0x4840u16, 0x4e80, 0x4ec0] {
+            for ea in 0u16..64 {
+                let opcode = base | ea;
+                let (mode, reg) = ea_mode_reg(opcode);
+                assert_eq!(decode_info(opcode).legality == Legality::Legal, legal_control(mode, reg));
+            }
+        }
+    }
+
+    #[test]
+    fn ccr_writes_preserve_reserved_low_byte_bits() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x003c).unwrap();
+        bus.write16(0x102, 0x00ff).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.sr = 0x2720;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.sr & 0x00e0, 0x0020);
+        assert_eq!(cpu.sr & 0x001f, 0x001f);
     }
 
     #[test]
