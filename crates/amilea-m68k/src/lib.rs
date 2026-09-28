@@ -132,6 +132,16 @@ impl Cpu {
                 self.set_logic_flags(size, value);
                 Ok(4)
             }
+            // Overlapping 68000 encodings must never fall through to the generic ALU decoder.
+            // Keep them explicit until their instruction families are implemented.
+            0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // SBCD
+            0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // ABCD
+            0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // SUBX
+            0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // ADDX
+            0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => Err(CpuError::UnimplementedOpcode { opcode }), // CMPM
+            0xc140..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => Err(CpuError::UnimplementedOpcode { opcode }), // EXG
+            0x80c0..=0x80ff | 0x81c0..=0x81ff => Err(CpuError::UnimplementedOpcode { opcode }), // DIVU/DIVS
+            0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => Err(CpuError::UnimplementedOpcode { opcode }), // MULU/MULS
             0x8000..=0x8fff | 0x9000..=0x9fff | 0xb000..=0xbfff | 0xc000..=0xcfff | 0xd000..=0xdfff => {
                 let top = opcode >> 12;
                 let opmode = ((opcode >> 6) & 7) as u8;
@@ -1467,6 +1477,35 @@ mod tests {
         assert_eq!(bus.read8(0x500).unwrap(), 5);
         assert_eq!(cpu.a[0], 0x501);
         assert_eq!(cpu.pc, 0x104);
+    }
+
+    #[test]
+    fn overlapping_alu_encodings_do_not_execute_as_generic_operations() {
+        for opcode in [
+            0x8100u16, // SBCD D0,D0
+            0xc100,    // ABCD D0,D0
+            0x9100,    // SUBX.B D0,D0
+            0xd100,    // ADDX.B D0,D0
+            0xb108,    // CMPM.B (A0)+,(A0)+
+            0xc140,    // EXG D0,D0
+            0x80c0,    // DIVU.W D0,D0
+            0x81c0,    // DIVS.W D0,D0
+            0xc0c0,    // MULU.W D0,D0
+            0xc1c0,    // MULS.W D0,D0
+        ] {
+            let mut bus = boot_bus();
+            bus.write16(0x100, opcode).unwrap();
+            let mut cpu = Cpu::default();
+            cpu.reset(&bus).unwrap();
+            let before = cpu.clone();
+            assert_eq!(
+                cpu.step(&mut bus),
+                Err(CpuError::UnimplementedOpcode { opcode }),
+                "opcode {opcode:#06x}"
+            );
+            assert_eq!(cpu.d, before.d, "opcode {opcode:#06x} changed D registers");
+            assert_eq!(cpu.a, before.a, "opcode {opcode:#06x} changed A registers");
+        }
     }
 
     #[test]
