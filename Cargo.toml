@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "crates/amilea-bus",
     "crates/amilea-core",
+    "crates/amilea-m68k",
     "crates/amilea-replay",
     "frontends/amilea-cli",
 ]
@@ -15,7 +17,9 @@ authors = ["Ploos AS"]
 repository = "https://github.com/Ploos-AS/Amilea"
 
 [workspace.dependencies]
+amilea-bus = { path = "crates/amilea-bus" }
 amilea-core = { path = "crates/amilea-core" }
+amilea-m68k = { path = "crates/amilea-m68k" }
 amilea-replay = { path = "crates/amilea-replay" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
