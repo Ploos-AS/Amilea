@@ -61,6 +61,9 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x4e70 => (System, "RESET"), 0x4e71 => (System, "NOP"), 0x4e72 => (System, "STOP"),
         0x4e73 => (System, "RTE"), 0x4e75 => (Control, "RTS"), 0x4e76 => (System, "TRAPV"),
         0x4e77 => (Control, "RTR"), 0x4e40..=0x4e4f => (System, "TRAP"),
+        0x4afc => (System, "ILLEGAL"),
+        0x4e60..=0x4e67 => (System, "MOVE-An-USP"),
+        0x4e68..=0x4e6f => (System, "MOVE-USP-An"),
         0x4848..=0x487f => (Control, "PEA"),
         0x4e80..=0x4ebf => (Control, "JSR"),
         0x4ec0..=0x4eff => (Control, "JMP"),
@@ -101,7 +104,8 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         _ => (Unknown, "UNKNOWN"),
     };
     let (ea_policy, legality) = match mnemonic {
-        "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "Bcc/BSR/BRA" | "MOVEQ" =>
+        "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "ILLEGAL" |
+        "MOVE-An-USP" | "MOVE-USP-An" | "Bcc/BSR/BRA" | "MOVEQ" =>
             (EaPolicy::None, Legality::Legal),
         "MOVEP" | "EXG" | "ABCD" | "SBCD" | "ADDX" | "SUBX" | "CMPM" => (EaPolicy::FamilySpecific, Legality::Legal),
         "PEA" | "JSR" | "JMP" => {
@@ -1501,6 +1505,27 @@ mod tests {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
         }
+    }
+
+    #[test]
+    fn system_control_metadata_covers_privileged_and_illegal_core() {
+        for opcode in [0x4e70u16, 0x4e71, 0x4e72, 0x4e73, 0x4e75, 0x4e76, 0x4e77, 0x4afc] {
+            let info = decode_info(opcode);
+            assert_ne!(info.class, InstructionClass::Unknown);
+            assert_eq!(info.legality, Legality::Legal);
+        }
+        for reg in 0u16..8 {
+            assert_eq!(decode_info(0x4e60 | reg).mnemonic, "MOVE-An-USP");
+            assert_eq!(decode_info(0x4e68 | reg).mnemonic, "MOVE-USP-An");
+        }
+    }
+
+    #[test]
+    fn four_x_unknown_count_is_bounded() {
+        let unknown = (0x4000u16..=0x4fff)
+            .filter(|&opcode| decode_info(opcode).class == InstructionClass::Unknown)
+            .count();
+        assert!(unknown < 2048, "too many 0x4xxx opcodes remain unknown: {unknown}");
     }
 
     #[test]
