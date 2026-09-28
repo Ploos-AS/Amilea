@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "crates/amilea-core",
+    "crates/amilea-replay",
+    "frontends/amilea-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+authors = ["Ploos AS"]
+repository = "https://github.com/Ploos-AS/Amilea"
+
+[workspace.dependencies]
+amilea-core = { path = "crates/amilea-core" }
+amilea-replay = { path = "crates/amilea-replay" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
