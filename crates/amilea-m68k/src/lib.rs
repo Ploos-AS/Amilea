@@ -140,7 +140,7 @@ impl Cpu {
             0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, true),
             0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => self.exec_cmpm(bus, opcode),
             0xc140..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => self.exec_exg(opcode),
-            0x80c0..=0x80ff | 0x81c0..=0x81ff => Err(CpuError::UnimplementedOpcode { opcode }), // DIVU/DIVS
+            0x80c0..=0x80ff | 0x81c0..=0x81ff => self.exec_div(bus, opcode, instruction_pc),
             0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => self.exec_mul(bus, opcode),
             0x8000..=0x8fff | 0x9000..=0x9fff | 0xb000..=0xbfff | 0xc000..=0xcfff | 0xd000..=0xdfff => {
                 let top = opcode >> 12;
@@ -636,6 +636,48 @@ impl Cpu {
             _ => return Err(CpuError::UnimplementedOpcode { opcode }),
         }
         Ok(6)
+    }
+
+    fn exec_div<B: Bus>(&mut self, bus: &mut B, opcode: u16, instruction_pc: u32) -> Result<u32, CpuError> {
+        let signed = opcode & 0x0100 != 0;
+        let dn = ((opcode >> 9) & 7) as usize;
+        let mode = ((opcode >> 3) & 7) as u8;
+        let reg = (opcode & 7) as usize;
+        let divisor_raw = self.read_ea(bus, Size::Word, mode, reg)? as u16;
+        if divisor_raw == 0 {
+            self.enter_exception(bus, 5, instruction_pc)?;
+            return Ok(38);
+        }
+        let dividend = self.d[dn];
+        if signed {
+            let divisor = divisor_raw as i16 as i32;
+            let dividend_signed = dividend as i32;
+            let quotient = dividend_signed / divisor;
+            if !(-32768..=32767).contains(&quotient) {
+                self.sr &= !(CCR_N | CCR_Z | CCR_C);
+                self.sr |= CCR_V;
+                return Ok(158);
+            }
+            let remainder = dividend_signed % divisor;
+            self.d[dn] = ((remainder as i16 as u16 as u32) << 16) | (quotient as i16 as u16 as u32);
+            self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
+            if quotient == 0 { self.sr |= CCR_Z; }
+            if quotient < 0 { self.sr |= CCR_N; }
+        } else {
+            let divisor = divisor_raw as u32;
+            let quotient = dividend / divisor;
+            if quotient > 0xffff {
+                self.sr &= !(CCR_N | CCR_Z | CCR_C);
+                self.sr |= CCR_V;
+                return Ok(140);
+            }
+            let remainder = dividend % divisor;
+            self.d[dn] = (remainder << 16) | quotient;
+            self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
+            if quotient == 0 { self.sr |= CCR_Z; }
+            if quotient & 0x8000 != 0 { self.sr |= CCR_N; }
+        }
+        Ok(if signed { 158 } else { 140 })
     }
 
     fn exec_mul<B: Bus>(&mut self, bus: &B, opcode: u16) -> Result<u32, CpuError> {
@@ -1688,12 +1730,73 @@ mod tests {
 
 
     #[test]
+    fn divu_packs_remainder_and_quotient_and_preserves_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x80fc).unwrap(); // DIVU.W #3,D0
+        bus.write16(0x102, 3).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 10;
+        cpu.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], (1 << 16) | 3);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_eq!(cpu.sr & (CCR_N | CCR_Z | CCR_V | CCR_C), 0);
+    }
+
+    #[test]
+    fn divs_uses_signed_quotient_and_remainder() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x81fc).unwrap(); // DIVS.W #-3,D0
+        bus.write16(0x102, 0xfffd).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = (-10i32) as u32;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], (0xffffu32 << 16) | 3);
+        assert_eq!(cpu.sr & (CCR_N | CCR_Z | CCR_V | CCR_C), 0);
+    }
+
+    #[test]
+    fn divide_overflow_sets_v_without_modifying_destination() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x80fc).unwrap(); // DIVU.W #1,D0
+        bus.write16(0x102, 1).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x0001_0000;
+        let before = cpu.d[0];
+        cpu.sr = CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], before);
+        assert_ne!(cpu.sr & CCR_V, 0);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_eq!(cpu.sr & CCR_C, 0);
+    }
+
+    #[test]
+    fn divide_by_zero_enters_vector_five_without_modifying_destination() {
+        let mut bus = boot_bus();
+        bus.write32(5 * 4, 0x260).unwrap();
+        bus.write16(0x100, 0x80fc).unwrap(); // DIVU.W #0,D0
+        bus.write16(0x102, 0).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x1234_5678;
+        let before = cpu.d[0];
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x260);
+        assert_eq!(cpu.d[0], before);
+        assert_eq!(bus.read32(cpu.a[7] + 2).unwrap(), 0x100);
+    }
+
+
+    #[test]
     fn overlapping_alu_encodings_do_not_execute_as_generic_operations() {
         for opcode in [
             0x8100u16, // SBCD D0,D0
             0xc100,    // ABCD D0,D0
-            0x80c0,    // DIVU.W D0,D0
-            0x81c0,    // DIVS.W D0,D0
+
         ] {
             let mut bus = boot_bus();
             bus.write16(0x100, opcode).unwrap();
