@@ -23,6 +23,41 @@ impl Size {
     fn bytes(self, reg: usize) -> u32 { match self { Self::Byte if reg == 7 => 2, Self::Byte => 1, Self::Word => 2, Self::Long => 4 } }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionClass { Alu, Bcd, Bit, Branch, Control, Move, MultiplyDivide, ShiftRotate, System, Unknown }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeInfo {
+    pub class: InstructionClass,
+    pub mnemonic: &'static str,
+}
+
+pub fn decode_info(opcode: u16) -> DecodeInfo {
+    use InstructionClass::*;
+    let (class, mnemonic) = match opcode {
+        0x4e70 => (System, "RESET"), 0x4e71 => (System, "NOP"), 0x4e72 => (System, "STOP"),
+        0x4e73 => (System, "RTE"), 0x4e75 => (Control, "RTS"), 0x4e76 => (System, "TRAPV"),
+        0x4e77 => (Control, "RTR"), 0x4e40..=0x4e4f => (System, "TRAP"),
+        0x6000..=0x6fff => (Branch, "Bcc/BSR/BRA"),
+        0x7000..=0x7fff => (Move, "MOVEQ"),
+        0xe000..=0xefff => (ShiftRotate, "SHIFT/ROTATE"),
+        0x0800..=0x08ff => (Bit, "BIT-IMM"),
+        0x0100..=0x01ff => (Bit, "BIT-REG"),
+        0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => (Bcd, "SBCD"),
+        0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => (Bcd, "ABCD"),
+        0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => (Alu, "SUBX"),
+        0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => (Alu, "ADDX"),
+        0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => (Alu, "CMPM"),
+        0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => (MultiplyDivide, "MUL"),
+        0x80c0..=0x80ff | 0x81c0..=0x81ff => (MultiplyDivide, "DIV"),
+        0x5000..=0x5fff => (Alu, "QUICK/COND"),
+        0x1000..=0x3fff => (Move, "MOVE"),
+        0x0000..=0x0fff | 0x8000..=0xdfff => (Alu, "ALU"),
+        _ => (Unknown, "UNKNOWN"),
+    };
+    DecodeInfo { class, mnemonic }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
     pub d: [u32; 8],
@@ -1338,6 +1373,24 @@ mod tests {
         bus.write32(0, 0x0000_3000).unwrap();
         bus.write32(4, 0x0000_0100).unwrap();
         bus
+    }
+
+    #[test]
+    fn decode_metadata_covers_entire_opcode_space_deterministically() {
+        for opcode in 0u16..=u16::MAX {
+            assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn decode_metadata_prioritizes_overlap_families() {
+        assert_eq!(decode_info(0xc100).mnemonic, "ABCD");
+        assert_eq!(decode_info(0x8100).mnemonic, "SBCD");
+        assert_eq!(decode_info(0xd100).mnemonic, "ADDX");
+        assert_eq!(decode_info(0x9100).mnemonic, "SUBX");
+        assert_eq!(decode_info(0xb108).mnemonic, "CMPM");
+        assert_eq!(decode_info(0xc0c0).class, InstructionClass::MultiplyDivide);
+        assert_eq!(decode_info(0x80c0).class, InstructionClass::MultiplyDivide);
     }
 
     #[test]
