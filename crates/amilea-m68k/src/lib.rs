@@ -63,6 +63,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x7000..=0x7fff => (Move, "MOVEQ"),
         0xe000..=0xefff => (ShiftRotate, "SHIFT/ROTATE"),
         0x0800..=0x08ff => (Bit, "BIT-IMM"),
+        0x0108..=0x01ff if opcode & 0x0138 == 0x0108 => (Move, "MOVEP"),
         0x0100..=0x01ff => (Bit, "BIT-REG"),
         0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => (Bcd, "SBCD"),
         0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => (Bcd, "ABCD"),
@@ -79,6 +80,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
     let (ea_policy, legality) = match mnemonic {
         "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "Bcc/BSR/BRA" | "MOVEQ" =>
             (EaPolicy::None, Legality::Legal),
+        "MOVEP" => (EaPolicy::FamilySpecific, Legality::Legal),
         "PEA" | "JSR" | "JMP" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
@@ -291,6 +293,7 @@ impl Cpu {
                 let bit = self.fetch16(bus)? as u32;
                 self.exec_bit_op(bus, operation, mode, reg, bit)
             }
+            0x0108..=0x01ff if opcode & 0x0138 == 0x0108 => self.exec_movep(bus, opcode),
             0x0100..=0x01ff if opcode & 0x0100 != 0 => {
                 let operation = ((opcode >> 6) & 3) as u8;
                 let bit_reg = ((opcode >> 9) & 7) as usize;
@@ -1003,6 +1006,30 @@ impl Cpu {
         Ok(6 + 2 * count)
     }
 
+    fn exec_movep<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
+        let dn = ((opcode >> 9) & 7) as usize;
+        let an = (opcode & 7) as usize;
+        let displacement = self.fetch16(bus)? as i16 as i32;
+        let address = add_displacement(self.a[an], displacement);
+        let long = opcode & 0x0040 != 0;
+        let reg_to_mem = opcode & 0x0080 != 0;
+        if reg_to_mem {
+            let value = self.d[dn];
+            if long {
+                for i in 0..4 { self.write_mem(bus, Size::Byte, address + i * 2, value >> (24 - i * 8))?; }
+            } else {
+                self.write_mem(bus, Size::Byte, address, value >> 8)?;
+                self.write_mem(bus, Size::Byte, address + 2, value)?;
+            }
+        } else {
+            let count = if long { 4 } else { 2 };
+            let mut value = 0u32;
+            for i in 0..count { value = (value << 8) | self.read_mem(bus, Size::Byte, address + i * 2)?; }
+            if long { self.d[dn] = value; } else { self.d[dn] = (self.d[dn] & 0xffff_0000) | value; }
+        }
+        Ok(if long { 24 } else { 16 })
+    }
+
     fn exec_bit_op<B: Bus>(&mut self, bus: &mut B, operation: u8, mode: u8, reg: usize, bit: u32) -> Result<u32, CpuError> {
         let legal = if operation == 0 { legal_data_read(mode, reg) } else { legal_data_alterable(mode, reg) };
         if !legal {
@@ -1437,6 +1464,30 @@ mod tests {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
         }
+    }
+
+    #[test]
+    fn movep_wins_over_dynamic_bit_decode_and_uses_spaced_bytes() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x0188).unwrap(); // MOVEP.W D0,(d16,A0)
+        bus.write16(0x102, 0x0010).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x0200; cpu.d[0] = 0x1234;
+        assert_eq!(decode_info(0x0188).mnemonic, "MOVEP");
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x210).unwrap(), 0x12);
+        assert_eq!(bus.read8(0x212).unwrap(), 0x34);
+    }
+
+    #[test]
+    fn movep_long_memory_to_register_reassembles_spaced_bytes() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x0148).unwrap(); // MOVEP.L (d16,A0),D0
+        bus.write16(0x102, 0).unwrap();
+        for (offset, value) in [(0,0x12),(2,0x34),(4,0x56),(6,0x78)] { bus.write8(0x200 + offset, value).unwrap(); }
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.a[0] = 0x200;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0x1234_5678);
     }
 
     #[test]
