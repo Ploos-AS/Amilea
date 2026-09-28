@@ -508,6 +508,7 @@ impl Cpu {
                 Ok(4)
             }
             0xe000..=0xefff if ((opcode >> 6) & 3) != 3 => self.exec_shift_register(opcode),
+            0xe0c0..=0xe7ff if ((opcode >> 6) & 3) == 3 => self.exec_shift_memory(bus, opcode),
             0x7000..=0x7fff => {
                 let register = ((opcode >> 9) & 7) as usize;
                 let value = (opcode as u8 as i8 as i32) as u32;
@@ -741,6 +742,47 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_shift_memory<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
+        let operation = ((opcode >> 9) & 3) as u8; // 0 AS, 1 LS, 2 ROX, 3 RO
+        let left = opcode & 0x0100 != 0;
+        let mode = ((opcode >> 3) & 7) as u8;
+        let reg = (opcode & 7) as usize;
+        if mode < 2 || (mode == 7 && reg > 1) {
+            return Err(CpuError::UnimplementedOpcode { opcode });
+        }
+        let target = self.resolve_rmw(bus, Size::Word, mode, reg)?;
+        let value = self.read_rmw(bus, Size::Word, target)? & 0xffff;
+        let old_x = self.sr & CCR_X != 0;
+        let (result, shifted) = if left {
+            let out = value & 0x8000 != 0;
+            let r = match operation {
+                2 => ((value << 1) & 0xffff) | u32::from(old_x),
+                3 => ((value << 1) & 0xffff) | u32::from(out),
+                _ => (value << 1) & 0xffff,
+            };
+            (r, out)
+        } else {
+            let out = value & 1 != 0;
+            let r = match operation {
+                0 => (value >> 1) | (value & 0x8000),
+                2 => (value >> 1) | if old_x { 0x8000 } else { 0 },
+                3 => (value >> 1) | if out { 0x8000 } else { 0 },
+                _ => value >> 1,
+            };
+            (r, out)
+        };
+        self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
+        if result & 0x8000 != 0 { self.sr |= CCR_N; }
+        if result == 0 { self.sr |= CCR_Z; }
+        if operation == 0 && left && ((value ^ result) & 0x8000 != 0) { self.sr |= CCR_V; }
+        if shifted { self.sr |= CCR_C; }
+        if operation != 3 {
+            if shifted { self.sr |= CCR_X; } else { self.sr &= !CCR_X; }
+        }
+        self.write_rmw(bus, Size::Word, target, result)?;
+        Ok(8)
     }
 
     fn exec_shift_register(&mut self, opcode: u16) -> Result<u32, CpuError> {
@@ -1801,6 +1843,56 @@ mod tests {
         cpu.sr = 0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
+    fn memory_shifts_are_word_sized_single_bit_operations() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xe0d0).unwrap(); // ASR.W (A0)
+        bus.write16(0x102, 0xe3d0).unwrap(); // LSL.W (A0)
+        bus.write16(0x500, 0x8001).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x500).unwrap(), 0xc000);
+        assert_ne!(cpu.sr & CCR_C, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x500).unwrap(), 0x8000);
+        assert_ne!(cpu.sr & CCR_C, 0);
+        assert_ne!(cpu.sr & CCR_X, 0);
+    }
+
+    #[test]
+    fn memory_rox_uses_extend_and_resolves_postincrement_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xe5d8).unwrap(); // ROXL.W (A0)+
+        bus.write16(0x500, 0x8000).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.sr = CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x500).unwrap(), 0x0001);
+        assert_eq!(cpu.a[0], 0x502);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_ne!(cpu.sr & CCR_C, 0);
+    }
+
+    #[test]
+    fn memory_rotate_preserves_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xe6d0).unwrap(); // ROR.W (A0)
+        bus.write16(0x500, 0x0001).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.sr = CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x500).unwrap(), 0x8000);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_ne!(cpu.sr & CCR_C, 0);
     }
 
 
