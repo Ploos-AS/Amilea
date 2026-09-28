@@ -1012,7 +1012,11 @@ impl Cpu {
         if signed {
             let divisor = divisor_raw as i16 as i32;
             let dividend_signed = dividend as i32;
-            let quotient = dividend_signed / divisor;
+            let Some(quotient) = dividend_signed.checked_div(divisor) else {
+                self.sr &= !(CCR_N | CCR_Z | CCR_C);
+                self.sr |= CCR_V;
+                return Ok(158);
+            };
             if !(-32768..=32767).contains(&quotient) {
                 self.sr &= !(CCR_N | CCR_Z | CCR_C);
                 self.sr |= CCR_V;
@@ -1906,6 +1910,22 @@ mod tests {
         cpu.sr = 0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
+    fn divs_min_by_minus_one_reports_overflow_without_panicking() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x81c1).unwrap(); // DIVS.W D1,D0
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x8000_0000;
+        cpu.d[1] = 0x0000_ffff;
+        cpu.sr = CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0x8000_0000);
+        assert_ne!(cpu.sr & CCR_V, 0);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_eq!(cpu.sr & CCR_C, 0);
     }
 
 
