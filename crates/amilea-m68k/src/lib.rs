@@ -49,6 +49,7 @@ fn is_sbcd(opcode: u16) -> bool { opcode & 0xf1f0 == 0x8100 }
 fn is_abcd(opcode: u16) -> bool { opcode & 0xf1f0 == 0xc100 }
 fn is_subx(opcode: u16) -> bool { opcode & 0xf130 == 0x9100 }
 fn is_addx(opcode: u16) -> bool { opcode & 0xf130 == 0xd100 }
+fn is_cmpm(opcode: u16) -> bool { opcode & 0xf138 == 0xb108 }
 
 pub fn decode_info(opcode: u16) -> DecodeInfo {
     use InstructionClass::*;
@@ -73,7 +74,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0xc000..=0xcfff if is_abcd(opcode) => (Bcd, "ABCD"),
         0x9000..=0x9fff if is_subx(opcode) => (Alu, "SUBX"),
         0xd000..=0xdfff if is_addx(opcode) => (Alu, "ADDX"),
-        0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => (Alu, "CMPM"),
+        0xb000..=0xbfff if is_cmpm(opcode) => (Alu, "CMPM"),
         0xc100..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => (Alu, "EXG"),
         0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => (MultiplyDivide, "MUL"),
         0x80c0..=0x80ff | 0x81c0..=0x81ff => (MultiplyDivide, "DIV"),
@@ -85,7 +86,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
     let (ea_policy, legality) = match mnemonic {
         "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "Bcc/BSR/BRA" | "MOVEQ" =>
             (EaPolicy::None, Legality::Legal),
-        "MOVEP" | "EXG" | "ABCD" | "SBCD" | "ADDX" | "SUBX" => (EaPolicy::FamilySpecific, Legality::Legal),
+        "MOVEP" | "EXG" | "ABCD" | "SBCD" | "ADDX" | "SUBX" | "CMPM" => (EaPolicy::FamilySpecific, Legality::Legal),
         "PEA" | "JSR" | "JMP" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
@@ -363,7 +364,7 @@ impl Cpu {
             0xc000..=0xcfff if is_abcd(opcode) => self.exec_abcd_sbcd(bus, opcode, true),
             0x9000..=0x9fff if is_subx(opcode) => self.exec_addx_subx(bus, opcode, false),
             0xd000..=0xdfff if is_addx(opcode) => self.exec_addx_subx(bus, opcode, true),
-            0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => self.exec_cmpm(bus, opcode),
+            0xb000..=0xbfff if is_cmpm(opcode) => self.exec_cmpm(bus, opcode),
             0xc140..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => self.exec_exg(opcode),
             0x80c0..=0x80ff | 0x81c0..=0x81ff => self.exec_div(bus, opcode, instruction_pc),
             0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => self.exec_mul(bus, opcode),
@@ -1469,6 +1470,35 @@ mod tests {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
         }
+    }
+
+    #[test]
+    fn cmpm_mask_covers_all_sizes_and_register_pairs() {
+        for dst in 0u16..8 {
+            for src in 0u16..8 {
+                for size in 0u16..3 {
+                    let opcode = 0xb108 | (dst << 9) | (size << 6) | src;
+                    assert!(is_cmpm(opcode));
+                    assert_eq!(decode_info(opcode).mnemonic, "CMPM");
+                }
+            }
+        }
+        assert!(!is_cmpm(0xb100));
+        assert!(!is_cmpm(0xb1c8));
+    }
+
+    #[test]
+    fn cmpm_postincrements_both_address_registers_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xb149).unwrap(); // CMPM.W (A1)+,(A0)+
+        bus.write16(0x200, 0x1234).unwrap();
+        bus.write16(0x300, 0x1234).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[1] = 0x200; cpu.a[0] = 0x300;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[1], 0x202);
+        assert_eq!(cpu.a[0], 0x302);
+        assert_ne!(cpu.sr & CCR_Z, 0);
     }
 
     #[test]
