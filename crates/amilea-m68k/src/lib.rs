@@ -70,6 +70,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => (Alu, "SUBX"),
         0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => (Alu, "ADDX"),
         0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => (Alu, "CMPM"),
+        0xc100..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => (Alu, "EXG"),
         0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => (MultiplyDivide, "MUL"),
         0x80c0..=0x80ff | 0x81c0..=0x81ff => (MultiplyDivide, "DIV"),
         0x5000..=0x5fff => (Alu, "QUICK/COND"),
@@ -80,7 +81,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
     let (ea_policy, legality) = match mnemonic {
         "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "Bcc/BSR/BRA" | "MOVEQ" =>
             (EaPolicy::None, Legality::Legal),
-        "MOVEP" => (EaPolicy::FamilySpecific, Legality::Legal),
+        "MOVEP" | "EXG" => (EaPolicy::FamilySpecific, Legality::Legal),
         "PEA" | "JSR" | "JMP" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
@@ -1463,6 +1464,32 @@ mod tests {
     fn decode_metadata_covers_entire_opcode_space_deterministically() {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn exg_metadata_wins_over_generic_alu_and_mul_families() {
+        for rx in 0u16..8 {
+            for ry in 0u16..8 {
+                for base in [0xc140u16, 0xc148, 0xc188] {
+                    let opcode = base | (rx << 9) | ry;
+                    assert_eq!(decode_info(opcode).mnemonic, "EXG");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exg_executes_all_three_register_forms_without_changing_flags() {
+        for opcode in [0xc141u16, 0xc149, 0xc189] {
+            let mut bus = boot_bus();
+            bus.write16(0x100, opcode).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            cpu.d[0] = 0x1111_1111; cpu.d[1] = 0x2222_2222;
+            cpu.a[0] = 0x3333_3333; cpu.a[1] = 0x4444_4444;
+            let sr = cpu.sr;
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.sr, sr);
         }
     }
 
