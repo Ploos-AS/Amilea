@@ -1477,6 +1477,50 @@ mod tests {
     }
 
     #[test]
+    fn full_opcode_space_preserves_qualified_family_priority() {
+        for opcode in 0u16..=u16::MAX {
+            let info = decode_info(opcode);
+            let expected = if is_sbcd(opcode) {
+                Some("SBCD")
+            } else if is_abcd(opcode) {
+                Some("ABCD")
+            } else if is_subx(opcode) {
+                Some("SUBX")
+            } else if is_addx(opcode) {
+                Some("ADDX")
+            } else if is_cmpm(opcode) {
+                Some("CMPM")
+            } else if matches!(opcode & 0xf1f8, 0xc140 | 0xc148 | 0xc188) {
+                Some("EXG")
+            } else if is_divu(opcode) || is_divs(opcode) {
+                Some("DIV")
+            } else if is_mulu(opcode) || is_muls(opcode) {
+                Some("MUL")
+            } else {
+                None
+            };
+            if let Some(mnemonic) = expected {
+                assert_eq!(info.mnemonic, mnemonic, "opcode {opcode:04x}");
+            }
+        }
+    }
+
+    #[test]
+    fn full_opcode_space_decode_metadata_is_self_consistent() {
+        for opcode in 0u16..=u16::MAX {
+            let info = decode_info(opcode);
+            if info.legality == Legality::Legal {
+                assert_ne!(info.class, InstructionClass::Unknown, "opcode {opcode:04x}");
+                assert_ne!(info.ea_policy, EaPolicy::Unknown, "opcode {opcode:04x}");
+            }
+            if info.class == InstructionClass::Unknown {
+                assert_eq!(info.mnemonic, "UNKNOWN", "opcode {opcode:04x}");
+                assert_ne!(info.legality, Legality::Legal, "opcode {opcode:04x}");
+            }
+        }
+    }
+
+    #[test]
     fn mul_div_masks_cover_signed_unsigned_destinations_and_eas() {
         for dn in 0u16..8 {
             for ea in 0u16..64 {
