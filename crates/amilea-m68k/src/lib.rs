@@ -187,6 +187,20 @@ impl Cpu {
                     Ok(10)
                 }
             }
+            0x0800..=0x08ff => {
+                let operation = ((opcode >> 6) & 3) as u8;
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let bit = self.fetch16(bus)? as u32;
+                self.exec_bit_op(bus, operation, mode, reg, bit)
+            }
+            0x0100..=0x01ff if opcode & 0x0100 != 0 => {
+                let operation = ((opcode >> 6) & 3) as u8;
+                let bit_reg = ((opcode >> 9) & 7) as usize;
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                self.exec_bit_op(bus, operation, mode, reg, self.d[bit_reg])
+            }
             0x0000..=0x0cff if opcode & 0x0f00 != 0x0800 => {
                 let family = opcode & 0x0f00;
                 let size_bits = (opcode >> 6) & 3;
@@ -726,6 +740,40 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_bit_op<B: Bus>(&mut self, bus: &mut B, operation: u8, mode: u8, reg: usize, bit: u32) -> Result<u32, CpuError> {
+        if mode == 1 || (mode == 7 && reg >= 4) {
+            return Err(CpuError::UnimplementedOpcode { opcode: 0 });
+        }
+        if mode == 0 {
+            let mask = 1u32 << (bit & 31);
+            let was_set = self.d[reg] & mask != 0;
+            if was_set { self.sr &= !CCR_Z; } else { self.sr |= CCR_Z; }
+            match operation {
+                0 => {}
+                1 => self.d[reg] ^= mask,
+                2 => self.d[reg] &= !mask,
+                3 => self.d[reg] |= mask,
+                _ => unreachable!(),
+            }
+            return Ok(if operation == 0 { 6 } else { 8 });
+        }
+        let target = self.resolve_rmw(bus, Size::Byte, mode, reg)?;
+        let value = self.read_rmw(bus, Size::Byte, target)?;
+        let mask = 1u32 << (bit & 7);
+        let was_set = value & mask != 0;
+        if was_set { self.sr &= !CCR_Z; } else { self.sr |= CCR_Z; }
+        if operation != 0 {
+            let result = match operation {
+                1 => value ^ mask,
+                2 => value & !mask,
+                3 => value | mask,
+                _ => unreachable!(),
+            };
+            self.write_rmw(bus, Size::Byte, target, result)?;
+        }
+        Ok(8)
     }
 
     fn exec_abcd_sbcd<B: Bus>(&mut self, bus: &mut B, opcode: u16, add: bool) -> Result<u32, CpuError> {
@@ -1697,6 +1745,63 @@ mod tests {
         cpu.sr = 0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
+    fn dynamic_bit_ops_use_modulo_32_on_data_registers_and_only_change_z() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x0300).unwrap(); // BTST D1,D0
+        bus.write16(0x102, 0x0340).unwrap(); // BCHG D1,D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 1 << 3;
+        cpu.d[1] = 35;
+        cpu.sr = CCR_X | CCR_N | CCR_V | CCR_C | CCR_Z;
+        let preserved = cpu.sr & !CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.sr & CCR_Z, 0);
+        assert_eq!(cpu.sr & !CCR_Z, preserved);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & (1 << 3), 0);
+        assert_eq!(cpu.sr & CCR_Z, 0);
+        assert_eq!(cpu.sr & !CCR_Z, preserved);
+    }
+
+    #[test]
+    fn immediate_memory_bit_ops_use_modulo_8_and_resolve_ea_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x08d8).unwrap(); // BSET #9,(A0)+
+        bus.write16(0x102, 9).unwrap();
+        bus.write16(0x104, 0x0890).unwrap(); // BCLR #1,(A0)
+        bus.write16(0x106, 1).unwrap();
+        bus.write8(0x500, 0).unwrap();
+        bus.write8(0x501, 0x02).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 0x02);
+        assert_eq!(cpu.a[0], 0x501);
+        assert_ne!(cpu.sr & CCR_Z, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x501).unwrap(), 0);
+        assert_eq!(cpu.a[0], 0x501);
+        assert_eq!(cpu.sr & CCR_Z, 0);
+    }
+
+    #[test]
+    fn btst_memory_does_not_write_destination() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x0810).unwrap(); // BTST #0,(A0)
+        bus.write16(0x102, 0).unwrap();
+        bus.write8(0x500, 0x5a).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 0x5a);
+        assert_ne!(cpu.sr & CCR_Z, 0);
     }
 
 
