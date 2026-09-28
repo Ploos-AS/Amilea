@@ -81,6 +81,61 @@ impl Cpu {
         };
 
         let result = match opcode {
+            0x003c | 0x023c | 0x0a3c => {
+                let immediate = self.fetch16(bus)? as u8 as u16;
+                let ccr = self.sr & 0x00ff;
+                let value = match opcode {
+                    0x003c => ccr | immediate,
+                    0x023c => ccr & immediate,
+                    0x0a3c => ccr ^ immediate,
+                    _ => unreachable!(),
+                };
+                self.sr = (self.sr & 0xff00) | (value & 0x00ff);
+                Ok(20)
+            }
+            0x007c | 0x027c | 0x0a7c => {
+                if !self.supervisor() {
+                    self.enter_exception(bus, 8, instruction_pc)?;
+                    return Ok(34);
+                }
+                let immediate = self.fetch16(bus)?;
+                let value = match opcode {
+                    0x007c => self.sr | immediate,
+                    0x027c => self.sr & immediate,
+                    0x0a7c => self.sr ^ immediate,
+                    _ => unreachable!(),
+                };
+                self.set_sr(value);
+                Ok(20)
+            }
+            0x4e70 => {
+                if !self.supervisor() {
+                    self.enter_exception(bus, 8, instruction_pc)?;
+                    return Ok(34);
+                }
+                Ok(132)
+            }
+            0x4e76 => {
+                if self.sr & CCR_V != 0 {
+                    self.enter_exception(bus, 7, self.pc)?;
+                    Ok(34)
+                } else {
+                    Ok(4)
+                }
+            }
+            0x4180..=0x41bf => {
+                let dn = ((opcode >> 9) & 7) as usize;
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let bound = self.read_ea(bus, Size::Word, mode, reg)? as u16 as i16 as i32;
+                let value = self.d[dn] as u16 as i16 as i32;
+                if value < 0 || value > bound {
+                    self.enter_exception(bus, 6, self.pc)?;
+                    Ok(40)
+                } else {
+                    Ok(10)
+                }
+            }
             0x0000..=0x0cff if opcode & 0x0f00 != 0x0800 => {
                 let family = opcode & 0x0f00;
                 let size_bits = (opcode >> 6) & 3;
@@ -1519,13 +1574,89 @@ mod tests {
     }
 
     #[test]
+    fn trapv_and_chk_enter_their_architectural_vectors() {
+        let mut bus = boot_bus();
+        bus.write32(7 * 4, 0x270).unwrap();
+        bus.write32(6 * 4, 0x260).unwrap();
+        bus.write16(0x100, 0x4e76).unwrap(); // TRAPV
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr |= CCR_V;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x270);
+
+        cpu.a[7] = 0x3000;
+        cpu.pc = 0x120;
+        bus.write16(0x120, 0x4181).unwrap(); // CHK.W D1,D0
+        cpu.d[0] = 11;
+        cpu.d[1] = 10;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x260);
+    }
+
+    #[test]
+    fn reset_is_privileged_and_is_a_cpu_side_noop() {
+        let mut bus = boot_bus();
+        bus.write32(8 * 4, 0x280).unwrap();
+        bus.write16(0x100, 0x4e70).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        assert_eq!(cpu.step(&mut bus).unwrap(), 132);
+        assert_eq!(cpu.pc, 0x102);
+        cpu.ssp = 0x3000;
+        cpu.usp = 0x2800;
+        cpu.a[7] = cpu.usp;
+        cpu.pc = 0x100;
+        cpu.sr = 0;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x280);
+    }
+
+    #[test]
+    fn immediate_ccr_and_sr_operations_decode_before_generic_immediate_alu() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x003c).unwrap(); // ORI #$11,CCR
+        bus.write16(0x102, 0x0011).unwrap();
+        bus.write16(0x104, 0x023c).unwrap(); // ANDI #$10,CCR
+        bus.write16(0x106, 0x0010).unwrap();
+        bus.write16(0x108, 0x0a3c).unwrap(); // EORI #$04,CCR
+        bus.write16(0x10a, 0x0004).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr = 0x2700;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.sr & 0xff, 0x11);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.sr & 0xff, 0x10);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.sr & 0xff, 0x14);
+    }
+
+    #[test]
+    fn immediate_sr_operations_are_privileged() {
+        let mut bus = boot_bus();
+        bus.write32(8 * 4, 0x280).unwrap();
+        bus.write16(0x100, 0x007c).unwrap(); // ORI #$0700,SR
+        bus.write16(0x102, 0x0700).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.ssp = 0x3000;
+        cpu.usp = 0x2800;
+        cpu.a[7] = cpu.usp;
+        cpu.sr = 0;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
     fn unimplemented_opcode_is_host_error_not_guest_illegal() {
         let mut bus = boot_bus();
         bus.write32(4 * 4, 0x240).unwrap();
-        bus.write16(0x100, 0x4e76).unwrap(); // TRAPV: valid 68000, not implemented yet
+        bus.write16(0x100, 0x4e77).unwrap(); // RTR: valid 68000, not implemented yet
         let mut cpu = Cpu::default();
         cpu.reset(&bus).unwrap();
-        assert_eq!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e76 }));
+        assert_eq!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e77 }));
         assert_eq!(cpu.pc, 0x102);
     }
 
