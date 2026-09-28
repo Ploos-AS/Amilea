@@ -50,6 +50,10 @@ fn is_abcd(opcode: u16) -> bool { opcode & 0xf1f0 == 0xc100 }
 fn is_subx(opcode: u16) -> bool { opcode & 0xf130 == 0x9100 }
 fn is_addx(opcode: u16) -> bool { opcode & 0xf130 == 0xd100 }
 fn is_cmpm(opcode: u16) -> bool { opcode & 0xf138 == 0xb108 }
+fn is_divu(opcode: u16) -> bool { opcode & 0xf1c0 == 0x80c0 }
+fn is_divs(opcode: u16) -> bool { opcode & 0xf1c0 == 0x81c0 }
+fn is_mulu(opcode: u16) -> bool { opcode & 0xf1c0 == 0xc0c0 }
+fn is_muls(opcode: u16) -> bool { opcode & 0xf1c0 == 0xc1c0 }
 
 pub fn decode_info(opcode: u16) -> DecodeInfo {
     use InstructionClass::*;
@@ -76,8 +80,8 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0xd000..=0xdfff if is_addx(opcode) => (Alu, "ADDX"),
         0xb000..=0xbfff if is_cmpm(opcode) => (Alu, "CMPM"),
         0xc100..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => (Alu, "EXG"),
-        0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => (MultiplyDivide, "MUL"),
-        0x80c0..=0x80ff | 0x81c0..=0x81ff => (MultiplyDivide, "DIV"),
+        0xc000..=0xcfff if is_mulu(opcode) || is_muls(opcode) => (MultiplyDivide, "MUL"),
+        0x8000..=0x8fff if is_divu(opcode) || is_divs(opcode) => (MultiplyDivide, "DIV"),
         0x5000..=0x5fff => (Alu, "QUICK/COND"),
         0x1000..=0x3fff => (Move, "MOVE"),
         0x0000..=0x0fff | 0x8000..=0xdfff => (Alu, "ALU"),
@@ -366,8 +370,8 @@ impl Cpu {
             0xd000..=0xdfff if is_addx(opcode) => self.exec_addx_subx(bus, opcode, true),
             0xb000..=0xbfff if is_cmpm(opcode) => self.exec_cmpm(bus, opcode),
             0xc140..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => self.exec_exg(opcode),
-            0x80c0..=0x80ff | 0x81c0..=0x81ff => self.exec_div(bus, opcode, instruction_pc),
-            0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => self.exec_mul(bus, opcode),
+            0x8000..=0x8fff if is_divu(opcode) || is_divs(opcode) => self.exec_div(bus, opcode, instruction_pc),
+            0xc000..=0xcfff if is_mulu(opcode) || is_muls(opcode) => self.exec_mul(bus, opcode),
             0x8000..=0x8fff | 0x9000..=0x9fff | 0xb000..=0xbfff | 0xc000..=0xcfff | 0xd000..=0xdfff => {
                 let top = opcode >> 12;
                 let opmode = ((opcode >> 6) & 7) as u8;
@@ -1470,6 +1474,28 @@ mod tests {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
         }
+    }
+
+    #[test]
+    fn mul_div_masks_cover_signed_unsigned_destinations_and_eas() {
+        for dn in 0u16..8 {
+            for ea in 0u16..64 {
+                let divu = 0x80c0 | (dn << 9) | ea;
+                let divs = 0x81c0 | (dn << 9) | ea;
+                let mulu = 0xc0c0 | (dn << 9) | ea;
+                let muls = 0xc1c0 | (dn << 9) | ea;
+                assert!(is_divu(divu)); assert!(is_divs(divs));
+                assert!(is_mulu(mulu)); assert!(is_muls(muls));
+                let (mode, reg) = ea_mode_reg(ea);
+                let expected = if legal_data_read(mode, reg) { Legality::Legal } else { Legality::Illegal };
+                assert_eq!(decode_info(divu).legality, expected);
+                assert_eq!(decode_info(divs).legality, expected);
+                assert_eq!(decode_info(mulu).legality, expected);
+                assert_eq!(decode_info(muls).legality, expected);
+            }
+        }
+        assert!(!is_divu(0x8080)); assert!(!is_divs(0x8180));
+        assert!(!is_mulu(0xc080)); assert!(!is_muls(0xc180));
     }
 
     #[test]
