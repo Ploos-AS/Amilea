@@ -248,7 +248,7 @@ impl Cpu {
                 let dn = ((opcode >> 9) & 7) as usize;
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
-                if mode == 1 || (mode == 7 && reg > 4) {
+                if !legal_data_read(mode, reg) {
                     return Err(CpuError::IllegalOpcode { opcode });
                 }
                 let bound = self.read_ea(bus, Size::Word, mode, reg)? as u16 as i16 as i32;
@@ -977,7 +977,8 @@ impl Cpu {
     }
 
     fn exec_bit_op<B: Bus>(&mut self, bus: &mut B, operation: u8, mode: u8, reg: usize, bit: u32) -> Result<u32, CpuError> {
-        if mode == 1 || (mode == 7 && (reg >= 4 || operation != 0 && reg >= 2)) {
+        let legal = if operation == 0 { legal_data_read(mode, reg) } else { legal_data_alterable(mode, reg) };
+        if !legal {
             return Err(CpuError::IllegalOpcode { opcode: 0 });
         }
         if mode == 0 {
@@ -1076,7 +1077,7 @@ impl Cpu {
         let dn = ((opcode >> 9) & 7) as usize;
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
-        if mode == 1 || (mode == 7 && reg > 4) {
+        if !legal_data_read(mode, reg) {
             return Err(CpuError::IllegalOpcode { opcode });
         }
         let divisor_raw = self.read_ea(bus, Size::Word, mode, reg)? as u16;
@@ -1125,7 +1126,7 @@ impl Cpu {
         let dn = ((opcode >> 9) & 7) as usize;
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
-        if mode == 1 || (mode == 7 && reg > 4) {
+        if !legal_data_read(mode, reg) {
             return Err(CpuError::IllegalOpcode { opcode });
         }
         let src = self.read_ea(bus, Size::Word, mode, reg)? as u16;
@@ -1408,6 +1409,30 @@ mod tests {
     fn decode_metadata_covers_entire_opcode_space_deterministically() {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn executor_and_metadata_agree_on_mul_div_ea_legality() {
+        for base in [0xc0c0u16, 0x80c0] {
+            for ea in 0u16..64 {
+                let opcode = base | ea;
+                let (mode, reg) = ea_mode_reg(opcode);
+                let expected = legal_data_read(mode, reg);
+                assert_eq!(decode_info(opcode).legality == Legality::Legal, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn bit_metadata_uses_shared_ea_legality_rules() {
+        for operation in 0u16..4 {
+            for ea in 0u16..64 {
+                let opcode = 0x0800 | (operation << 6) | ea;
+                let (mode, reg) = ea_mode_reg(opcode);
+                let expected = if mode == 0 { true } else if operation == 0 { legal_data_read(mode, reg) } else { legal_data_alterable(mode, reg) };
+                assert_eq!(decode_info(opcode).legality == Legality::Legal, expected);
+            }
         }
     }
 
