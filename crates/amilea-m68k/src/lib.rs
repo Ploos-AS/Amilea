@@ -507,6 +507,7 @@ impl Cpu {
                 self.write_ea(bus, Size::Byte, mode, reg, value)?;
                 Ok(4)
             }
+            0xe000..=0xefff if ((opcode >> 6) & 3) != 3 => self.exec_shift_register(opcode),
             0x7000..=0x7fff => {
                 let register = ((opcode >> 9) & 7) as usize;
                 let value = (opcode as u8 as i8 as i32) as u32;
@@ -740,6 +741,61 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_shift_register(&mut self, opcode: u16) -> Result<u32, CpuError> {
+        let size = decode_size((opcode >> 6) & 3).ok_or(CpuError::UnimplementedOpcode { opcode })?;
+        let reg = (opcode & 7) as usize;
+        let left = opcode & 0x0100 != 0;
+        let use_register_count = opcode & 0x0020 != 0;
+        let count_field = ((opcode >> 9) & 7) as usize;
+        let count = if use_register_count { self.d[count_field] & 63 } else { if count_field == 0 { 8 } else { count_field as u32 } };
+        let kind = ((opcode >> 3) & 3) as u8; // 0 AS, 1 LS, 2 ROX, 3 RO
+        let mask = size.mask();
+        let sign = size.sign();
+        let mut value = self.d[reg] & mask;
+        let mut x = self.sr & CCR_X != 0;
+        let mut last = false;
+        let mut overflow = false;
+        for _ in 0..count {
+            if left {
+                last = value & sign != 0;
+                let next = match kind {
+                    2 => ((value << 1) & mask) | u32::from(x),
+                    3 => ((value << 1) & mask) | u32::from(last),
+                    _ => (value << 1) & mask,
+                };
+                if kind == 0 && ((value ^ next) & sign != 0) { overflow = true; }
+                value = next;
+            } else {
+                last = value & 1 != 0;
+                value = match kind {
+                    0 => (value >> 1) | (value & sign),
+                    2 => (value >> 1) | if x { sign } else { 0 },
+                    3 => (value >> 1) | if last { sign } else { 0 },
+                    _ => value >> 1,
+                };
+            }
+            if kind == 2 { x = last; }
+        }
+        self.d[reg] = (self.d[reg] & !mask) | value;
+        self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
+        if value & sign != 0 { self.sr |= CCR_N; }
+        if value == 0 { self.sr |= CCR_Z; }
+        if kind == 0 && left && overflow { self.sr |= CCR_V; }
+        if count != 0 {
+            if last { self.sr |= CCR_C; }
+            if kind != 3 {
+                if kind == 2 {
+                    if x { self.sr |= CCR_X; } else { self.sr &= !CCR_X; }
+                } else {
+                    if last { self.sr |= CCR_X; } else { self.sr &= !CCR_X; }
+                }
+            }
+        } else if kind == 2 {
+            if x { self.sr |= CCR_C; }
+        }
+        Ok(6 + 2 * count)
     }
 
     fn exec_bit_op<B: Bus>(&mut self, bus: &mut B, operation: u8, mode: u8, reg: usize, bit: u32) -> Result<u32, CpuError> {
@@ -1745,6 +1801,61 @@ mod tests {
         cpu.sr = 0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
+    fn register_shifts_cover_arithmetic_logical_and_rotate() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xe200).unwrap(); // ASR.B #1,D0
+        bus.write16(0x102, 0xe309).unwrap(); // LSL.B #1,D1
+        bus.write16(0x104, 0xe21a).unwrap(); // ROR.B #1,D2
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x81;
+        cpu.d[1] = 0x81;
+        cpu.d[2] = 0x01;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0xc0);
+        assert_ne!(cpu.sr & CCR_C, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[1] & 0xff, 0x02);
+        assert_ne!(cpu.sr & (CCR_C | CCR_X), 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[2] & 0xff, 0x80);
+        assert_ne!(cpu.sr & CCR_C, 0);
+    }
+
+    #[test]
+    fn roxl_and_roxr_use_extend_as_part_of_rotation() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xe310).unwrap(); // ROXL.B #1,D0
+        bus.write16(0x102, 0xe210).unwrap(); // ROXR.B #1,D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x80;
+        cpu.sr = CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x01);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_ne!(cpu.sr & CCR_C, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x80);
+    }
+
+    #[test]
+    fn register_count_zero_preserves_x_and_sets_rox_c_from_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xe130).unwrap(); // ROXL.B D0,D0; count low 6 bits = 0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x40;
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x40);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_ne!(cpu.sr & CCR_C, 0);
+        assert_eq!(cpu.sr & CCR_V, 0);
     }
 
 
