@@ -3,6 +3,7 @@
 use amilea_bus::{Bus, BusError};
 use thiserror::Error;
 
+const CCR_X: u16 = 0x10;
 const CCR_N: u16 = 0x08;
 const CCR_Z: u16 = 0x04;
 const SR_SUPERVISOR: u16 = 0x2000;
@@ -68,6 +69,47 @@ impl Cpu {
         };
 
         match opcode {
+            0x4200..=0x42bf => {
+                let size = decode_size((opcode >> 6) & 3).unwrap();
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                self.write_ea(bus, size, mode, reg, 0)?;
+                self.set_logic_flags(size, 0);
+                Ok(4)
+            }
+            0x4a00..=0x4abf => {
+                let size = decode_size((opcode >> 6) & 3).unwrap();
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let value = self.read_ea(bus, size, mode, reg)?;
+                self.set_logic_flags(size, value);
+                Ok(4)
+            }
+            0x9000..=0x9fff | 0xb000..=0xbfff | 0xd000..=0xdfff => {
+                let top = opcode >> 12;
+                let opmode = ((opcode >> 6) & 7) as u8;
+                let dn = ((opcode >> 9) & 7) as usize;
+                if opmode > 2 {
+                    self.enter_exception(bus, 4, instruction_pc)?;
+                    return Ok(34);
+                }
+                let size = decode_size(opmode as u16).unwrap();
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let src = self.read_ea(bus, size, mode, reg)?;
+                let dst = self.d[dn] & size.mask();
+                let result = match top {
+                    0x9 => self.alu_sub(size, dst, src, true),
+                    0xb => self.alu_sub(size, dst, src, false),
+                    0xd => self.alu_add(size, dst, src),
+                    _ => unreachable!(),
+                };
+                if top != 0xb {
+                    let mask = size.mask();
+                    self.d[dn] = (self.d[dn] & !mask) | (result & mask);
+                }
+                Ok(4)
+            }
             0x41c0..=0x4fc0 if opcode & 0x01c0 == 0x01c0 => {
                 let dst = ((opcode >> 9) & 7) as usize;
                 let mode = ((opcode >> 3) & 7) as u8;
@@ -347,6 +389,48 @@ impl Cpu {
         Ok(())
     }
 
+    fn set_logic_flags(&mut self, size: Size, value: u32) {
+        self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
+        let value = value & size.mask();
+        if value == 0 { self.sr |= CCR_Z; }
+        if value & size.sign() != 0 { self.sr |= CCR_N; }
+    }
+
+    fn alu_add(&mut self, size: Size, dst: u32, src: u32) -> u32 {
+        let mask = size.mask();
+        let sign = size.sign();
+        let a = dst & mask;
+        let b = src & mask;
+        let result = a.wrapping_add(b) & mask;
+        self.sr &= !(CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C);
+        if result == 0 { self.sr |= CCR_Z; }
+        if result & sign != 0 { self.sr |= CCR_N; }
+        if (!(a ^ b) & (a ^ result) & sign) != 0 { self.sr |= CCR_V; }
+        let carry = if size == Size::Long { (a as u64 + b as u64) > u32::MAX as u64 } else { a + b > mask };
+        if carry { self.sr |= CCR_C | CCR_X; }
+        result
+    }
+
+    fn alu_sub(&mut self, size: Size, dst: u32, src: u32, update_x: bool) -> u32 {
+        let mask = size.mask();
+        let sign = size.sign();
+        let a = dst & mask;
+        let b = src & mask;
+        let result = a.wrapping_sub(b) & mask;
+        let old_x = self.sr & CCR_X;
+        self.sr &= !(CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C);
+        if result == 0 { self.sr |= CCR_Z; }
+        if result & sign != 0 { self.sr |= CCR_N; }
+        if ((a ^ b) & (a ^ result) & sign) != 0 { self.sr |= CCR_V; }
+        if b > a {
+            self.sr |= CCR_C;
+            if update_x { self.sr |= CCR_X; }
+        } else if !update_x {
+            self.sr |= old_x;
+        }
+        result
+    }
+
     fn set_move_flags(&mut self, size: Size, value: u32) {
         self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
         let value = value & size.mask();
@@ -400,6 +484,10 @@ impl Cpu {
         if value == 0 { self.sr |= CCR_Z; }
         if value & 0x8000_0000 != 0 { self.sr |= CCR_N; }
     }
+}
+
+fn decode_size(bits: u16) -> Option<Size> {
+    match bits { 0 => Some(Size::Byte), 1 => Some(Size::Word), 2 => Some(Size::Long), _ => None }
 }
 
 fn add_displacement(pc: u32, displacement: i32) -> u32 {
@@ -583,6 +671,45 @@ mod tests {
         cpu.reset(&bus).unwrap();
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.a[1], 0x112);
+    }
+
+    #[test]
+    fn add_sub_cmp_share_correct_flag_primitives() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xd001).unwrap(); // ADD.B D1,D0
+        bus.write16(0x102, 0x9001).unwrap(); // SUB.B D1,D0
+        bus.write16(0x104, 0xb001).unwrap(); // CMP.B D1,D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x7f;
+        cpu.d[1] = 1;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x80);
+        assert_ne!(cpu.sr & CCR_V, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x7f);
+        let before = cpu.d[0];
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], before);
+    }
+
+    #[test]
+    fn clr_and_tst_use_ea_and_preserve_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4210).unwrap(); // CLR.B (A0)
+        bus.write16(0x102, 0x4a10).unwrap(); // TST.B (A0)
+        bus.write8(0x500, 0x80).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.sr |= CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 0);
+        assert_ne!(cpu.sr & CCR_Z, 0);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_ne!(cpu.sr & CCR_Z, 0);
+        assert_ne!(cpu.sr & CCR_X, 0);
     }
 
     #[test]
