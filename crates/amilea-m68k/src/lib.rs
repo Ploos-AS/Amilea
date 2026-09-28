@@ -134,8 +134,8 @@ impl Cpu {
             }
             // Overlapping 68000 encodings must never fall through to the generic ALU decoder.
             // Keep them explicit until their instruction families are implemented.
-            0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // SBCD
-            0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => Err(CpuError::UnimplementedOpcode { opcode }), // ABCD
+            0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => self.exec_abcd_sbcd(bus, opcode, false),
+            0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => self.exec_abcd_sbcd(bus, opcode, true),
             0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, false),
             0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, true),
             0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => self.exec_cmpm(bus, opcode),
@@ -620,6 +620,51 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_abcd_sbcd<B: Bus>(&mut self, bus: &mut B, opcode: u16, add: bool) -> Result<u32, CpuError> {
+        let dst_reg = ((opcode >> 9) & 7) as usize;
+        let src_reg = (opcode & 7) as usize;
+        let memory = opcode & 0x0008 != 0;
+        let (src, dst, dst_addr) = if memory {
+            self.a[src_reg] = self.a[src_reg].wrapping_sub(Size::Byte.bytes(src_reg)) & 0x00ff_ffff;
+            let src = self.read_mem(bus, Size::Byte, self.a[src_reg])? as u8;
+            self.a[dst_reg] = self.a[dst_reg].wrapping_sub(Size::Byte.bytes(dst_reg)) & 0x00ff_ffff;
+            let address = self.a[dst_reg];
+            let dst = self.read_mem(bus, Size::Byte, address)? as u8;
+            (src, dst, Some(address))
+        } else {
+            (self.d[src_reg] as u8, self.d[dst_reg] as u8, None)
+        };
+        let x = if self.sr & CCR_X != 0 { 1i16 } else { 0 };
+        let old_z = self.sr & CCR_Z != 0;
+        let (result, carry) = if add {
+            let binary = dst as i16 + src as i16 + x;
+            let mut adjusted = binary;
+            if (dst & 0x0f) as i16 + (src & 0x0f) as i16 + x > 9 { adjusted += 0x06; }
+            let carry = adjusted > 0x99;
+            if carry { adjusted += 0x60; }
+            (adjusted as u8, carry)
+        } else {
+            let binary = dst as i16 - src as i16 - x;
+            let low_borrow = (dst & 0x0f) as i16 - (src & 0x0f) as i16 - x < 0;
+            let mut adjusted = binary;
+            if low_borrow { adjusted -= 0x06; }
+            let borrow = adjusted < 0;
+            if borrow { adjusted -= 0x60; }
+            (adjusted as u8, borrow)
+        };
+        self.sr &= !(CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C);
+        if result & 0x80 != 0 { self.sr |= CCR_N; }
+        if result == 0 && old_z { self.sr |= CCR_Z; }
+        if carry { self.sr |= CCR_X | CCR_C; }
+        // V is undefined for BCD instructions on the 68000; leave it clear deterministically.
+        if let Some(address) = dst_addr {
+            self.write_mem(bus, Size::Byte, address, result as u32)?;
+        } else {
+            self.d[dst_reg] = (self.d[dst_reg] & !0xff) | result as u32;
+        }
+        Ok(if memory { 18 } else { 6 })
     }
 
     fn exec_exg(&mut self, opcode: u16) -> Result<u32, CpuError> {
@@ -1792,10 +1837,78 @@ mod tests {
 
 
     #[test]
+    fn abcd_uses_decimal_carry_extend_and_sticky_zero() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xc101).unwrap(); // ABCD D1,D0
+        bus.write16(0x102, 0xc101).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x99;
+        cpu.d[1] = 0;
+        cpu.sr = CCR_X | CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0);
+        assert_ne!(cpu.sr & (CCR_X | CCR_C), 0);
+        assert_ne!(cpu.sr & CCR_Z, 0);
+        cpu.d[1] = 1;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 2);
+        assert_eq!(cpu.sr & CCR_Z, 0);
+    }
+
+    #[test]
+    fn sbcd_borrows_decimal_and_sets_x_and_c() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x8101).unwrap(); // SBCD D1,D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x00;
+        cpu.d[1] = 0x01;
+        cpu.sr = CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x99);
+        assert_eq!(cpu.sr & (CCR_X | CCR_C), CCR_X | CCR_C);
+        assert_eq!(cpu.sr & CCR_Z, 0);
+    }
+
+    #[test]
+    fn abcd_memory_form_predecrements_each_address_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xc109).unwrap(); // ABCD -(A1),-(A0)
+        bus.write8(0x4ff, 0x09).unwrap();
+        bus.write8(0x5ff, 0x01).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.a[1] = 0x600;
+        cpu.sr = CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[0], 0x4ff);
+        assert_eq!(cpu.a[1], 0x5ff);
+        assert_eq!(bus.read8(0x4ff).unwrap(), 0x10);
+    }
+
+    #[test]
+    fn bcd_byte_predecrement_keeps_a7_word_aligned() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xc10f).unwrap(); // ABCD -(A7),-(A0)
+        bus.write8(0x4ff, 0x01).unwrap();
+        bus.write8(0x6fe, 0x01).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.a[7] = 0x700;
+        cpu.sr = CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[0], 0x4ff);
+        assert_eq!(cpu.a[7], 0x6fe);
+        assert_eq!(bus.read8(0x4ff).unwrap(), 0x02);
+    }
+
+
+    #[test]
     fn overlapping_alu_encodings_do_not_execute_as_generic_operations() {
         for opcode in [
-            0x8100u16, // SBCD D0,D0
-            0xc100,    // ABCD D0,D0
 
         ] {
             let mut bus = boot_bus();
