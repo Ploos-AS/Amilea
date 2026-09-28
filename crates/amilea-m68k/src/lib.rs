@@ -6,6 +6,7 @@ use thiserror::Error;
 const CCR_X: u16 = 0x10;
 const CCR_N: u16 = 0x08;
 const CCR_Z: u16 = 0x04;
+const SR_TRACE: u16 = 0x8000;
 const SR_SUPERVISOR: u16 = 0x2000;
 const CCR_V: u16 = 0x02;
 const CCR_C: u16 = 0x01;
@@ -34,6 +35,8 @@ pub struct Cpu {
 pub enum CpuError {
     #[error(transparent)]
     Bus(#[from] BusError),
+    #[error("68000 opcode {opcode:#06x} is not implemented")]
+    UnimplementedOpcode { opcode: u16 },
 }
 
 impl Default for Cpu {
@@ -374,10 +377,20 @@ impl Cpu {
                 self.set_nz32(value);
                 Ok(4)
             }
-            _ => {
+            0x4afc => {
                 self.enter_exception(bus, 4, instruction_pc)?;
                 Ok(34)
             }
+            0xa000..=0xafff => {
+                self.enter_exception(bus, 10, instruction_pc)?;
+                Ok(34)
+            }
+            0xf000..=0xffff => {
+                self.enter_exception(bus, 11, instruction_pc)?;
+                Ok(34)
+            }
+            _ => Err(CpuError::UnimplementedOpcode { opcode }),
+
         }
     }
 
@@ -443,7 +456,7 @@ impl Cpu {
             self.usp = self.a[7];
             self.a[7] = self.ssp;
         }
-        self.sr |= SR_SUPERVISOR;
+        self.sr = (self.sr | SR_SUPERVISOR) & !SR_TRACE;
     }
 
     fn set_sr(&mut self, value: u16) {
@@ -715,7 +728,7 @@ impl Cpu {
     }
 
     fn set_nz32(&mut self, value: u32) {
-        self.sr &= !(CCR_N | CCR_Z);
+        self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
         if value == 0 { self.sr |= CCR_Z; }
         if value & 0x8000_0000 != 0 { self.sr |= CCR_N; }
     }
@@ -767,7 +780,7 @@ mod tests {
     fn illegal_instruction_uses_vector_four() {
         let mut bus = boot_bus();
         bus.write32(4 * 4, 0x240).unwrap();
-        bus.write16(0x100, 0xffff).unwrap();
+        bus.write16(0x100, 0x4afc).unwrap();
         let mut cpu = Cpu::default();
         cpu.reset(&bus).unwrap();
         assert_eq!(cpu.step(&mut bus).unwrap(), 34);
@@ -1234,6 +1247,59 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.usp, 0x1234_5678);
         assert_eq!(cpu.a[1], 0x1234_5678);
+    }
+
+    #[test]
+    fn line_a_and_line_f_use_architectural_vectors() {
+        let mut bus = boot_bus();
+        bus.write32(10 * 4, 0x220).unwrap();
+        bus.write32(11 * 4, 0x240).unwrap();
+        bus.write16(0x100, 0xa123).unwrap();
+        bus.write16(0x102, 0xf123).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x220);
+        cpu.a[7] = 0x3000;
+        cpu.pc = 0x102;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x240);
+    }
+
+    #[test]
+    fn unimplemented_opcode_is_host_error_not_guest_illegal() {
+        let mut bus = boot_bus();
+        bus.write32(4 * 4, 0x240).unwrap();
+        bus.write16(0x100, 0x4e76).unwrap(); // TRAPV: valid 68000, not implemented yet
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        assert_eq!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e76 }));
+        assert_eq!(cpu.pc, 0x102);
+    }
+
+    #[test]
+    fn exception_clears_live_trace_bit_but_stacks_original_sr() {
+        let mut bus = boot_bus();
+        bus.write32(32 * 4, 0x200).unwrap();
+        bus.write16(0x100, 0x4e40).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr |= SR_TRACE;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.sr & SR_TRACE, 0);
+        assert_ne!(bus.read16(cpu.a[7]).unwrap() & SR_TRACE, 0);
+    }
+
+    #[test]
+    fn moveq_clears_v_and_c_but_preserves_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x7001).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr |= CCR_X | CCR_V | CCR_C;
+        cpu.step(&mut bus).unwrap();
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_eq!(cpu.sr & (CCR_V | CCR_C), 0);
     }
 
     #[test]
