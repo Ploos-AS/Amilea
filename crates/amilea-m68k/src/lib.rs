@@ -67,6 +67,12 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x40c0..=0x40ff => (System, "MOVE-SR-EA"),
         0x44c0..=0x44ff => (System, "MOVE-EA-CCR"),
         0x46c0..=0x46ff => (System, "MOVE-EA-SR"),
+        0x4000..=0x40bf => (Alu, "NEGX"),
+        0x4200..=0x42bf => (Alu, "CLR"),
+        0x4400..=0x44bf => (Alu, "NEG"),
+        0x4600..=0x46bf => (Alu, "NOT"),
+        0x4800..=0x483f => (Bcd, "NBCD"),
+        0x4ac0..=0x4aff if opcode != 0x4afc => (System, "TAS"),
         0x4000..=0x4fff if opcode & 0xf1c0 == 0x4180 => (System, "CHK"),
         0x6000..=0x6fff => (Branch, "Bcc/BSR/BRA"),
         0x7000..=0x7fff => (Move, "MOVEQ"),
@@ -94,6 +100,10 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         "PEA" | "JSR" | "JMP" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
+        "NEGX" | "CLR" | "NEG" | "NOT" | "NBCD" | "TAS" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::DataAlterable, if legal_data_alterable(mode, reg) { Legality::Legal } else { Legality::Illegal })
         }
         "MOVE-SR-EA" => {
             let (mode, reg) = ea_mode_reg(opcode);
@@ -1473,6 +1483,20 @@ mod tests {
     fn decode_metadata_covers_entire_opcode_space_deterministically() {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn unary_metadata_uses_data_alterable_policy_for_all_eas() {
+        for base in [0x4000u16, 0x4200, 0x4400, 0x4600, 0x4800, 0x4ac0] {
+            for ea in 0u16..64 {
+                let opcode = base | ea;
+                if opcode == 0x4afc { continue; }
+                let info = decode_info(opcode);
+                let (mode, reg) = ea_mode_reg(opcode);
+                let expected = if legal_data_alterable(mode, reg) { Legality::Legal } else { Legality::Illegal };
+                assert_eq!(info.legality, expected, "opcode {opcode:04x}");
+            }
         }
     }
 
