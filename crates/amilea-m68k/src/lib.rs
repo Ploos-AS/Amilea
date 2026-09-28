@@ -108,6 +108,10 @@ impl Cpu {
                 self.set_sr(value);
                 Ok(20)
             }
+            0x4000..=0x40bf => self.exec_unary_rmw(bus, opcode, 0),
+            0x4400..=0x44bf => self.exec_unary_rmw(bus, opcode, 1),
+            0x4600..=0x46bf => self.exec_unary_rmw(bus, opcode, 2),
+            0x4ac0..=0x4aff if opcode != 0x4afc => self.exec_tas(bus, opcode),
             0x40c0..=0x40ff => {
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
@@ -743,6 +747,44 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_unary_rmw<B: Bus>(&mut self, bus: &mut B, opcode: u16, operation: u8) -> Result<u32, CpuError> {
+        let size = decode_size((opcode >> 6) & 3).ok_or(CpuError::UnimplementedOpcode { opcode })?;
+        let mode = ((opcode >> 3) & 7) as u8;
+        let reg = (opcode & 7) as usize;
+        if mode == 1 || (mode == 7 && reg >= 2) { return Err(CpuError::UnimplementedOpcode { opcode }); }
+        let target = self.resolve_rmw(bus, size, mode, reg)?;
+        let value = self.read_rmw(bus, size, target)?;
+        let result = match operation {
+            0 => { // NEGX
+                let old_z = self.sr & CCR_Z != 0;
+                let x = u32::from(self.sr & CCR_X != 0);
+                let r = self.alu_sub(size, 0, value.wrapping_add(x), true);
+                if r & size.mask() == 0 && old_z { self.sr |= CCR_Z; } else { self.sr &= !CCR_Z; }
+                r
+            }
+            1 => self.alu_sub(size, 0, value, true), // NEG
+            2 => { // NOT
+                let r = (!value) & size.mask();
+                self.set_logic_flags(size, r);
+                r
+            }
+            _ => unreachable!(),
+        };
+        self.write_rmw(bus, size, target, result)?;
+        Ok(if mode == 0 { if size == Size::Long { 6 } else { 4 } } else { 8 })
+    }
+
+    fn exec_tas<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
+        let mode = ((opcode >> 3) & 7) as u8;
+        let reg = (opcode & 7) as usize;
+        if mode == 1 || (mode == 7 && reg >= 2) { return Err(CpuError::UnimplementedOpcode { opcode }); }
+        let target = self.resolve_rmw(bus, Size::Byte, mode, reg)?;
+        let value = self.read_rmw(bus, Size::Byte, target)? & 0xff;
+        self.set_logic_flags(Size::Byte, value);
+        self.write_rmw(bus, Size::Byte, target, value | 0x80)?;
+        Ok(if mode == 0 { 4 } else { 10 })
     }
 
     fn exec_addq_subq<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
@@ -1864,6 +1906,44 @@ mod tests {
         cpu.sr = 0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x280);
+    }
+
+
+    #[test]
+    fn neg_and_not_update_flags_and_preserve_operand_width() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4400).unwrap(); // NEG.B D0
+        bus.write16(0x102, 0x4641).unwrap(); // NOT.W D1
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x1234_0001; cpu.d[1] = 0xabcd_00ff; cpu.sr = CCR_X;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0x1234_00ff); assert_ne!(cpu.sr & (CCR_X | CCR_C | CCR_N), 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[1], 0xabcd_ff00); assert_ne!(cpu.sr & CCR_N, 0); assert_eq!(cpu.sr & (CCR_V | CCR_C), 0);
+    }
+
+    #[test]
+    fn negx_uses_extend_and_sticky_zero() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4000).unwrap(); // NEGX.B D0
+        bus.write16(0x102, 0x4001).unwrap(); // NEGX.B D1
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0; cpu.d[1] = 1; cpu.sr = CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0); assert_ne!(cpu.sr & CCR_Z, 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[1] & 0xff, 0xff); assert_eq!(cpu.sr & CCR_Z, 0); assert_ne!(cpu.sr & (CCR_X | CCR_C), 0);
+    }
+
+    #[test]
+    fn tas_tests_original_byte_then_sets_high_bit_and_resolves_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4ad8).unwrap(); // TAS (A0)+
+        bus.write8(0x500, 0).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.a[0] = 0x500; cpu.sr = CCR_X | CCR_C;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 0x80); assert_eq!(cpu.a[0], 0x501);
+        assert_ne!(cpu.sr & CCR_Z, 0); assert_ne!(cpu.sr & CCR_X, 0); assert_eq!(cpu.sr & (CCR_V | CCR_C), 0);
     }
 
 
