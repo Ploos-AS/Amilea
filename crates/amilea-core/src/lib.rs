@@ -145,7 +145,10 @@ mod tests {
 
     fn scenario(machine: &mut Amilea) {
         machine.run_cycles(10);
-        machine.inject(InputEvent::Key { code: 0x50, pressed: true });
+        machine.inject(InputEvent::Key {
+            code: 0x50,
+            pressed: true,
+        });
         machine.run_cycles(1_000);
         machine.inject(InputEvent::SerialRx(b'A'));
         machine.run_cycles(99);
@@ -166,12 +169,18 @@ mod tests {
         let mut original = Amilea::new(MachineConfig::default());
         original.run_cycles(500);
         let checkpoint = original.snapshot();
-        original.inject(InputEvent::Joystick { port: 1, state: 0x11 });
+        original.inject(InputEvent::Joystick {
+            port: 1,
+            state: 0x11,
+        });
         original.run_cycles(500);
 
         let mut replayed = Amilea::new(MachineConfig::default());
         replayed.restore(&checkpoint);
-        replayed.inject(InputEvent::Joystick { port: 1, state: 0x11 });
+        replayed.inject(InputEvent::Joystick {
+            port: 1,
+            state: 0x11,
+        });
         replayed.run_cycles(500);
 
         assert_eq!(original.state_hash(), replayed.state_hash());
