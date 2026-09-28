@@ -37,6 +37,8 @@ pub enum CpuError {
     Bus(#[from] BusError),
     #[error("68000 opcode {opcode:#06x} is not implemented")]
     UnimplementedOpcode { opcode: u16 },
+    #[error("68000 data access fault: {fault}")]
+    DataAccess { fault: BusError, read: bool },
 }
 
 impl Default for Cpu {
@@ -75,7 +77,7 @@ impl Cpu {
             }
         };
 
-        match opcode {
+        let result = match opcode {
             0x0000..=0x0cff if opcode & 0x0f00 != 0x0800 => {
                 let family = opcode & 0x0f00;
                 let size_bits = (opcode >> 6) & 3;
@@ -391,6 +393,17 @@ impl Cpu {
             }
             _ => Err(CpuError::UnimplementedOpcode { opcode }),
 
+        };
+        match result {
+            Err(CpuError::DataAccess { fault, read }) => {
+                let (vector, address) = match fault {
+                    BusError::AddressError { address } => (3, address),
+                    BusError::Unmapped { address } => (2, address),
+                };
+                self.enter_access_fault(bus, vector, instruction_pc, opcode, address, read, false)?;
+                Ok(50)
+            }
+            other => other,
         }
     }
 
@@ -595,20 +608,21 @@ impl Cpu {
     }
 
     fn read_mem<B: Bus>(&self, bus: &B, size: Size, address: u32) -> Result<u32, CpuError> {
-        Ok(match size {
-            Size::Byte => bus.read8(address)? as u32,
-            Size::Word => bus.read16(address)? as u32,
-            Size::Long => bus.read32(address)?,
-        })
+        let result = match size {
+            Size::Byte => bus.read8(address).map(|value| value as u32),
+            Size::Word => bus.read16(address).map(|value| value as u32),
+            Size::Long => bus.read32(address),
+        };
+        result.map_err(|fault| CpuError::DataAccess { fault, read: true })
     }
 
     fn write_mem<B: Bus>(&self, bus: &mut B, size: Size, address: u32, value: u32) -> Result<(), CpuError> {
-        match size {
-            Size::Byte => bus.write8(address, value as u8)?,
-            Size::Word => bus.write16(address, value as u16)?,
-            Size::Long => bus.write32(address, value)?,
-        }
-        Ok(())
+        let result = match size {
+            Size::Byte => bus.write8(address, value as u8),
+            Size::Word => bus.write16(address, value as u16),
+            Size::Long => bus.write32(address, value),
+        };
+        result.map_err(|fault| CpuError::DataAccess { fault, read: false })
     }
 
     fn condition_true(&self, condition: u8) -> bool {
@@ -1300,6 +1314,51 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_ne!(cpu.sr & CCR_X, 0);
         assert_eq!(cpu.sr & (CCR_V | CCR_C), 0);
+    }
+
+    #[test]
+    fn odd_data_read_enters_address_error_vector() {
+        let mut bus = boot_bus();
+        bus.write32(3 * 4, 0x2c0).unwrap();
+        bus.write16(0x100, 0x3010).unwrap(); // MOVE.W (A0),D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x501;
+        let sp = cpu.a[7];
+        assert_eq!(cpu.step(&mut bus).unwrap(), 50);
+        assert_eq!(cpu.pc, 0x2c0);
+        assert_eq!(cpu.a[7], sp - 14);
+        assert_eq!(bus.read16(cpu.a[7] + 6).unwrap(), 0x3010);
+        assert_eq!(bus.read32(cpu.a[7] + 10).unwrap(), 0x501);
+        assert_ne!(bus.read16(cpu.a[7]).unwrap() & (1 << 4), 0);
+    }
+
+    #[test]
+    fn odd_data_write_enters_address_error_vector_as_write() {
+        let mut bus = boot_bus();
+        bus.write32(3 * 4, 0x2c0).unwrap();
+        bus.write16(0x100, 0x3080).unwrap(); // MOVE.W D0,(A0)
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x501;
+        cpu.d[0] = 0x1234;
+        assert_eq!(cpu.step(&mut bus).unwrap(), 50);
+        assert_eq!(cpu.pc, 0x2c0);
+        assert_eq!(bus.read32(cpu.a[7] + 10).unwrap(), 0x501);
+        assert_eq!(bus.read16(cpu.a[7]).unwrap() & (1 << 4), 0);
+    }
+
+    #[test]
+    fn unmapped_data_read_enters_bus_error_vector() {
+        let mut bus = boot_bus();
+        bus.write32(2 * 4, 0x2a0).unwrap();
+        bus.write16(0x100, 0x2010).unwrap(); // MOVE.L (A0),D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x8000;
+        assert_eq!(cpu.step(&mut bus).unwrap(), 50);
+        assert_eq!(cpu.pc, 0x2a0);
+        assert_eq!(bus.read32(cpu.a[7] + 10).unwrap(), 0x8000);
     }
 
     #[test]
