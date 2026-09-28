@@ -45,6 +45,8 @@ fn legal_data_read(mode: u8, reg: usize) -> bool { mode != 1 && !(mode == 7 && r
 fn legal_data_alterable(mode: u8, reg: usize) -> bool { mode != 1 && !(mode == 7 && reg >= 2) }
 fn legal_memory_alterable(mode: u8, reg: usize) -> bool { matches!(mode, 2..=6) || (mode == 7 && reg <= 1) }
 fn legal_control(mode: u8, reg: usize) -> bool { matches!(mode, 2 | 5 | 6) || (mode == 7 && reg <= 3) }
+fn is_sbcd(opcode: u16) -> bool { opcode & 0xf1f0 == 0x8100 }
+fn is_abcd(opcode: u16) -> bool { opcode & 0xf1f0 == 0xc100 }
 
 pub fn decode_info(opcode: u16) -> DecodeInfo {
     use InstructionClass::*;
@@ -65,8 +67,8 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x0800..=0x08ff => (Bit, "BIT-IMM"),
         0x0108..=0x01ff if opcode & 0x0138 == 0x0108 => (Move, "MOVEP"),
         0x0100..=0x01ff => (Bit, "BIT-REG"),
-        0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => (Bcd, "SBCD"),
-        0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => (Bcd, "ABCD"),
+        0x8000..=0x8fff if is_sbcd(opcode) => (Bcd, "SBCD"),
+        0xc000..=0xcfff if is_abcd(opcode) => (Bcd, "ABCD"),
         0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => (Alu, "SUBX"),
         0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => (Alu, "ADDX"),
         0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => (Alu, "CMPM"),
@@ -81,7 +83,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
     let (ea_policy, legality) = match mnemonic {
         "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "Bcc/BSR/BRA" | "MOVEQ" =>
             (EaPolicy::None, Legality::Legal),
-        "MOVEP" | "EXG" => (EaPolicy::FamilySpecific, Legality::Legal),
+        "MOVEP" | "EXG" | "ABCD" | "SBCD" => (EaPolicy::FamilySpecific, Legality::Legal),
         "PEA" | "JSR" | "JMP" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
@@ -355,8 +357,8 @@ impl Cpu {
             }
             // Overlapping 68000 encodings must never fall through to the generic ALU decoder.
             // Keep them explicit until their instruction families are implemented.
-            0x8100..=0x81ff if opcode & 0x01f0 == 0x0100 => self.exec_abcd_sbcd(bus, opcode, false),
-            0xc100..=0xc1ff if opcode & 0x01f0 == 0x0100 => self.exec_abcd_sbcd(bus, opcode, true),
+            0x8000..=0x8fff if is_sbcd(opcode) => self.exec_abcd_sbcd(bus, opcode, false),
+            0xc000..=0xcfff if is_abcd(opcode) => self.exec_abcd_sbcd(bus, opcode, true),
             0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, false),
             0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, true),
             0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => self.exec_cmpm(bus, opcode),
@@ -1465,6 +1467,25 @@ mod tests {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
         }
+    }
+
+    #[test]
+    fn bcd_family_masks_cover_register_and_predecrement_forms_only() {
+        for dst in 0u16..8 {
+            for src in 0u16..8 {
+                for memory in [false, true] {
+                    let form = if memory { 0x0008 } else { 0 };
+                    let sbcd = 0x8100 | (dst << 9) | form | src;
+                    let abcd = 0xc100 | (dst << 9) | form | src;
+                    assert!(is_sbcd(sbcd));
+                    assert!(is_abcd(abcd));
+                    assert_eq!(decode_info(sbcd).mnemonic, "SBCD");
+                    assert_eq!(decode_info(abcd).mnemonic, "ABCD");
+                }
+            }
+        }
+        assert!(!is_sbcd(0x8110));
+        assert!(!is_abcd(0xc110));
     }
 
     #[test]
