@@ -58,6 +58,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x40c0..=0x40ff => (System, "MOVE-SR-EA"),
         0x44c0..=0x44ff => (System, "MOVE-EA-CCR"),
         0x46c0..=0x46ff => (System, "MOVE-EA-SR"),
+        0x4000..=0x4fff if opcode & 0xf1c0 == 0x4180 => (System, "CHK"),
         0x6000..=0x6fff => (Branch, "Bcc/BSR/BRA"),
         0x7000..=0x7fff => (Move, "MOVEQ"),
         0xe000..=0xefff => (ShiftRotate, "SHIFT/ROTATE"),
@@ -86,7 +87,7 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::DataAlterable, if legal_data_alterable(mode, reg) { Legality::Legal } else { Legality::Illegal })
         }
-        "MOVE-EA-CCR" | "MOVE-EA-SR" => {
+        "MOVE-EA-CCR" | "MOVE-EA-SR" | "CHK" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::DataRead, if legal_data_read(mode, reg) { Legality::Legal } else { Legality::Illegal })
         }
@@ -267,7 +268,7 @@ impl Cpu {
                     Ok(4)
                 }
             }
-            0x4180..=0x41bf => {
+            0x4000..=0x4fff if opcode & 0xf1c0 == 0x4180 => {
                 let dn = ((opcode >> 9) & 7) as usize;
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
@@ -1435,6 +1436,31 @@ mod tests {
     fn decode_metadata_covers_entire_opcode_space_deterministically() {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn chk_decode_covers_all_destination_registers() {
+        for dn in 0u16..8 {
+            let opcode = 0x4180 | (dn << 9); // CHK.W D0,Dn
+            let info = decode_info(opcode);
+            assert_eq!(info.mnemonic, "CHK");
+            assert_eq!(info.legality, Legality::Legal);
+
+            let mut bus = boot_bus();
+            bus.write16(0x100, opcode).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            cpu.d[0] = 7;
+            cpu.d[dn as usize] = 3;
+            assert!(cpu.step(&mut bus).is_ok());
+        }
+    }
+
+    #[test]
+    fn chk_rejects_address_register_direct_source_for_every_destination() {
+        for dn in 0u16..8 {
+            let opcode = 0x4188 | (dn << 9);
+            assert_eq!(decode_info(opcode).legality, Legality::Illegal);
         }
     }
 
