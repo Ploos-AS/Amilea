@@ -69,6 +69,40 @@ impl Cpu {
         };
 
         match opcode {
+            0x0000..=0x0cff if opcode & 0x0f00 != 0x0800 => {
+                let family = opcode & 0x0f00;
+                let size_bits = (opcode >> 6) & 3;
+                if size_bits == 3 {
+                    self.enter_exception(bus, 4, instruction_pc)?;
+                    return Ok(34);
+                }
+                let size = decode_size(size_bits).unwrap();
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let immediate = match size {
+                    Size::Byte => self.fetch16(bus)? as u8 as u32,
+                    Size::Word => self.fetch16(bus)? as u32,
+                    Size::Long => self.fetch32(bus)?,
+                };
+                let dst = self.read_ea(bus, size, mode, reg)?;
+                let result = match family {
+                    0x0000 => { let r = dst | immediate; self.set_logic_flags(size, r); r }
+                    0x0200 => { let r = dst & immediate; self.set_logic_flags(size, r); r }
+                    0x0400 => self.alu_sub(size, dst, immediate, true),
+                    0x0600 => self.alu_add(size, dst, immediate),
+                    0x0a00 => { let r = dst ^ immediate; self.set_logic_flags(size, r); r }
+                    0x0c00 => {
+                        self.alu_sub(size, dst, immediate, false);
+                        return Ok(4);
+                    }
+                    _ => {
+                        self.enter_exception(bus, 4, instruction_pc)?;
+                        return Ok(34);
+                    }
+                };
+                self.write_ea(bus, size, mode, reg, result)?;
+                Ok(4)
+            }
             0x4200..=0x42bf => {
                 let size = decode_size((opcode >> 6) & 3).unwrap();
                 let mode = ((opcode >> 3) & 7) as u8;
@@ -106,6 +140,21 @@ impl Cpu {
                     return Ok(4);
                 }
 
+                if matches!(opmode, 4 | 5 | 6) {
+                    let size = decode_size((opmode - 4) as u16).unwrap();
+                    let src = self.d[dn] & size.mask();
+                    let dst = self.read_ea(bus, size, mode, reg)?;
+                    let result = match top {
+                        0x8 => { let r = dst | src; self.set_logic_flags(size, r); r }
+                        0x9 => self.alu_sub(size, dst, src, true),
+                        0xb => { let r = dst ^ src; self.set_logic_flags(size, r); r }
+                        0xc => { let r = dst & src; self.set_logic_flags(size, r); r }
+                        0xd => self.alu_add(size, dst, src),
+                        _ => unreachable!(),
+                    };
+                    self.write_ea(bus, size, mode, reg, result)?;
+                    return Ok(4);
+                }
                 if opmode > 2 {
                     self.enter_exception(bus, 4, instruction_pc)?;
                     return Ok(34);
@@ -776,6 +825,64 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0] & 0xff, 0x0f);
         assert_eq!(cpu.sr & (CCR_N | CCR_Z | CCR_V | CCR_C), 0);
+    }
+
+    #[test]
+    fn immediate_alu_family_operates_on_data_registers() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x0600).unwrap(); // ADDI.B #1,D0
+        bus.write16(0x102, 1).unwrap();
+        bus.write16(0x104, 0x0400).unwrap(); // SUBI.B #1,D0
+        bus.write16(0x106, 1).unwrap();
+        bus.write16(0x108, 0x0c00).unwrap(); // CMPI.B #$7f,D0
+        bus.write16(0x10a, 0x7f).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x7f;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x80);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x7f);
+        cpu.step(&mut bus).unwrap();
+        assert_ne!(cpu.sr & CCR_Z, 0);
+    }
+
+    #[test]
+    fn immediate_logic_and_eor_to_memory_use_ea_engine() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x0010).unwrap(); // ORI.B #$0f,(A0)
+        bus.write16(0x102, 0x000f).unwrap();
+        bus.write16(0x104, 0x0210).unwrap(); // ANDI.B #$3f,(A0)
+        bus.write16(0x106, 0x003f).unwrap();
+        bus.write16(0x108, 0xb110).unwrap(); // EOR.B D0,(A0)
+        bus.write8(0x500, 0xf0).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.d[0] = 0x0f;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 0xff);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 0x3f);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 0x30);
+    }
+
+    #[test]
+    fn add_and_sub_data_register_to_memory_are_supported() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xd110).unwrap(); // ADD.B D0,(A0)
+        bus.write16(0x102, 0x9310).unwrap(); // SUB.B D1,(A0)
+        bus.write8(0x500, 10).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.d[0] = 5;
+        cpu.d[1] = 3;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 15);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 12);
     }
 
     #[test]
