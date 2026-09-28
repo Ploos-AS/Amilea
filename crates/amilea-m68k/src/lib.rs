@@ -27,10 +27,22 @@ impl Size {
 pub enum InstructionClass { Alu, Bcd, Bit, Branch, Control, Move, MultiplyDivide, ShiftRotate, System, Unknown }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EaPolicy { None, DataRead, DataAlterable, MemoryAlterable, Control, FamilySpecific, Unknown }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Legality { Legal, Illegal, FamilySpecific, Unknown }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeInfo {
     pub class: InstructionClass,
     pub mnemonic: &'static str,
+    pub ea_policy: EaPolicy,
+    pub legality: Legality,
 }
+
+fn ea_mode_reg(opcode: u16) -> (u8, usize) { (((opcode >> 3) & 7) as u8, (opcode & 7) as usize) }
+fn legal_data_read(mode: u8, reg: usize) -> bool { mode != 1 && !(mode == 7 && reg > 4) }
+fn legal_data_alterable(mode: u8, reg: usize) -> bool { mode != 1 && !(mode == 7 && reg >= 2) }
 
 pub fn decode_info(opcode: u16) -> DecodeInfo {
     use InstructionClass::*;
@@ -55,7 +67,24 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x0000..=0x0fff | 0x8000..=0xdfff => (Alu, "ALU"),
         _ => (Unknown, "UNKNOWN"),
     };
-    DecodeInfo { class, mnemonic }
+    let (ea_policy, legality) = match mnemonic {
+        "RESET" | "NOP" | "STOP" | "RTE" | "RTS" | "TRAPV" | "RTR" | "TRAP" | "Bcc/BSR/BRA" | "MOVEQ" =>
+            (EaPolicy::None, Legality::Legal),
+        "MUL" | "DIV" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::DataRead, if legal_data_read(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
+        "BIT-IMM" | "BIT-REG" => {
+            let operation = ((opcode >> 6) & 3) as u8;
+            let (mode, reg) = ea_mode_reg(opcode);
+            let legal = if mode == 0 { true } else if operation == 0 { legal_data_read(mode, reg) } else { legal_data_alterable(mode, reg) };
+            (if operation == 0 { EaPolicy::DataRead } else { EaPolicy::DataAlterable }, if legal { Legality::Legal } else { Legality::Illegal })
+        }
+        "ABCD" | "SBCD" | "ADDX" | "SUBX" | "CMPM" => (EaPolicy::FamilySpecific, Legality::Legal),
+        "SHIFT/ROTATE" | "QUICK/COND" | "MOVE" | "ALU" => (EaPolicy::FamilySpecific, Legality::FamilySpecific),
+        _ => (EaPolicy::Unknown, Legality::Unknown),
+    };
+    DecodeInfo { class, mnemonic, ea_policy, legality }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1379,6 +1408,25 @@ mod tests {
     fn decode_metadata_covers_entire_opcode_space_deterministically() {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn decode_metadata_exposes_known_ea_legality() {
+        assert_eq!(decode_info(0xc0c0).legality, Legality::Legal); // MULU D0,D0
+        assert_eq!(decode_info(0xc0c8).legality, Legality::Illegal); // MULU A0,D0
+        assert_eq!(decode_info(0x083a).legality, Legality::Legal); // BTST #n,(d16,PC)
+        assert_eq!(decode_info(0x08fa).legality, Legality::Illegal); // BSET #n,(d16,PC)
+        assert_eq!(decode_info(0x4e71).ea_policy, EaPolicy::None);
+    }
+
+    #[test]
+    fn opcode_space_metadata_never_claims_unknown_legality_as_legal() {
+        for opcode in 0u16..=u16::MAX {
+            let info = decode_info(opcode);
+            if info.ea_policy == EaPolicy::Unknown {
+                assert_ne!(info.legality, Legality::Legal);
+            }
         }
     }
 
