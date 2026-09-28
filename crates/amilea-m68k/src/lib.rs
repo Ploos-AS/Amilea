@@ -235,17 +235,54 @@ impl Cpu {
                 self.pc = target;
                 Ok(20)
             }
-            0x6000..=0x60ff => {
-                let displacement = self.branch_displacement(bus, opcode)?;
-                self.pc = add_displacement(self.pc, displacement);
-                Ok(10)
+            0x6000..=0x6fff => {
+                let condition = ((opcode >> 8) & 0x0f) as u8;
+                let short = opcode as u8 as i8;
+                let base = self.pc;
+                let displacement = if short == 0 {
+                    self.fetch16(bus)? as i16 as i32
+                } else {
+                    short as i32
+                };
+                if condition == 0 {
+                    self.pc = add_displacement(base, displacement);
+                    Ok(10)
+                } else if condition == 1 {
+                    let return_pc = self.pc;
+                    self.push32(bus, return_pc)?;
+                    self.pc = add_displacement(base, displacement);
+                    Ok(18)
+                } else if self.condition_true(condition) {
+                    self.pc = add_displacement(base, displacement);
+                    Ok(10)
+                } else {
+                    Ok(if short == 0 { 12 } else { 8 })
+                }
             }
-            0x6100..=0x61ff => {
-                let displacement = self.branch_displacement(bus, opcode)?;
-                let return_pc = self.pc;
-                self.push32(bus, return_pc)?;
-                self.pc = add_displacement(self.pc, displacement);
-                Ok(18)
+            0x50c8..=0x5fcf => {
+                let condition = ((opcode >> 8) & 0x0f) as u8;
+                let reg = (opcode & 7) as usize;
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                if self.condition_true(condition) {
+                    Ok(12)
+                } else {
+                    let counter = (self.d[reg] as u16).wrapping_sub(1);
+                    self.d[reg] = (self.d[reg] & 0xffff_0000) | counter as u32;
+                    if counter != 0xffff {
+                        self.pc = add_displacement(self.pc, displacement);
+                        Ok(10)
+                    } else {
+                        Ok(14)
+                    }
+                }
+            }
+            0x50c0..=0x5fff if ((opcode >> 6) & 3) == 3 => {
+                let condition = ((opcode >> 8) & 0x0f) as u8;
+                let mode = ((opcode >> 3) & 7) as u8;
+                let reg = (opcode & 7) as usize;
+                let value = if self.condition_true(condition) { 0xff } else { 0x00 };
+                self.write_ea(bus, Size::Byte, mode, reg, value)?;
+                Ok(4)
             }
             0x7000..=0x7fff => {
                 let register = ((opcode >> 9) & 7) as usize;
@@ -453,6 +490,32 @@ impl Cpu {
             Size::Long => bus.write32(address, value)?,
         }
         Ok(())
+    }
+
+    fn condition_true(&self, condition: u8) -> bool {
+        let c = self.sr & CCR_C != 0;
+        let v = self.sr & CCR_V != 0;
+        let z = self.sr & CCR_Z != 0;
+        let n = self.sr & CCR_N != 0;
+        match condition & 0x0f {
+            0 => true,
+            1 => false,
+            2 => !c && !z,
+            3 => c || z,
+            4 => !c,
+            5 => c,
+            6 => !z,
+            7 => z,
+            8 => !v,
+            9 => v,
+            10 => !n,
+            11 => n,
+            12 => n == v,
+            13 => n != v,
+            14 => !z && n == v,
+            15 => z || n != v,
+            _ => unreachable!(),
+        }
     }
 
     fn set_logic_flags(&mut self, size: Size, value: u32) {
@@ -883,6 +946,64 @@ mod tests {
         assert_eq!(bus.read8(0x500).unwrap(), 15);
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read8(0x500).unwrap(), 12);
+    }
+
+    #[test]
+    fn bcc_uses_shared_condition_engine() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x6702).unwrap(); // BEQ.S +2
+        bus.write16(0x102, 0x7001).unwrap(); // MOVEQ #1,D0
+        bus.write16(0x104, 0x7002).unwrap(); // MOVEQ #2,D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr |= CCR_Z;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x104);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 2);
+    }
+
+    #[test]
+    fn dbcc_decrements_low_word_until_minus_one() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x51c8).unwrap(); // DBF D0,-4
+        bus.write16(0x102, 0xfffc).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 1;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xffff, 0);
+        assert_eq!(cpu.pc, 0x100);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xffff, 0xffff);
+        assert_eq!(cpu.pc, 0x104);
+    }
+
+    #[test]
+    fn scc_writes_ff_or_zero_without_changing_ccr() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x57c0).unwrap(); // SEQ D0
+        bus.write16(0x102, 0x56c1).unwrap(); // SNE D1
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr |= CCR_Z;
+        let sr = cpu.sr;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0xff);
+        assert_eq!(cpu.d[1] & 0xff, 0x00);
+        assert_eq!(cpu.sr, sr);
+    }
+
+    #[test]
+    fn signed_conditions_use_n_xor_v() {
+        let mut cpu = Cpu::default();
+        cpu.sr = CCR_N | CCR_V;
+        assert!(cpu.condition_true(12)); // GE
+        assert!(cpu.condition_true(14)); // GT when Z clear
+        cpu.sr = CCR_N;
+        assert!(cpu.condition_true(13)); // LT
+        assert!(cpu.condition_true(15)); // LE
     }
 
     #[test]
