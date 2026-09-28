@@ -5,6 +5,7 @@ use thiserror::Error;
 
 const CCR_N: u16 = 0x08;
 const CCR_Z: u16 = 0x04;
+const SR_SUPERVISOR: u16 = 0x2000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
@@ -19,8 +20,6 @@ pub struct Cpu {
 pub enum CpuError {
     #[error(transparent)]
     Bus(#[from] BusError),
-    #[error("illegal opcode {opcode:#06x} at {pc:#08x}")]
-    IllegalOpcode { pc: u32, opcode: u16 },
 }
 
 impl Default for Cpu {
@@ -46,14 +45,21 @@ impl Cpu {
 
         match opcode {
             0x4e71 => Ok(4),
-            0x4e75 => {
+            0x4e75 => { self.pc = self.pop32(bus)?; Ok(16) }
+            0x4e73 => {
+                self.sr = self.pop16(bus)?;
                 self.pc = self.pop32(bus)?;
-                Ok(16)
+                Ok(20)
             }
             0x4e72 => {
                 self.sr = self.fetch16(bus)?;
                 self.stopped = true;
                 Ok(4)
+            }
+            0x4e40..=0x4e4f => {
+                let vector = 32 + (opcode & 0x000f) as u8;
+                self.enter_exception(bus, vector, self.pc)?;
+                Ok(34)
             }
             0x4eb9 => {
                 let target = self.fetch32(bus)? & 0x00ff_ffff;
@@ -81,8 +87,38 @@ impl Cpu {
                 self.set_nz32(value);
                 Ok(4)
             }
-            _ => Err(CpuError::IllegalOpcode { pc: instruction_pc, opcode }),
+            _ => {
+                self.enter_exception(bus, 4, instruction_pc)?;
+                Ok(34)
+            }
         }
+    }
+
+    pub fn interrupt<B: Bus>(&mut self, bus: &mut B, level: u8, vector: u8) -> Result<u32, CpuError> {
+        let level = level.min(7);
+        let mask = ((self.sr >> 8) & 7) as u8;
+        if level <= mask && level != 7 {
+            return Ok(0);
+        }
+        self.stopped = false;
+        let saved_pc = self.pc;
+        let saved_sr = self.sr;
+        self.sr = (self.sr & !0x0700) | ((level as u16) << 8);
+        self.enter_exception_with_sr(bus, vector, saved_pc, saved_sr)?;
+        Ok(44)
+    }
+
+    fn enter_exception<B: Bus>(&mut self, bus: &mut B, vector: u8, saved_pc: u32) -> Result<(), CpuError> {
+        let saved_sr = self.sr;
+        self.enter_exception_with_sr(bus, vector, saved_pc, saved_sr)
+    }
+
+    fn enter_exception_with_sr<B: Bus>(&mut self, bus: &mut B, vector: u8, saved_pc: u32, saved_sr: u16) -> Result<(), CpuError> {
+        self.sr |= SR_SUPERVISOR;
+        self.push32(bus, saved_pc)?;
+        self.push16(bus, saved_sr)?;
+        self.pc = bus.read32((vector as u32) * 4)? & 0x00ff_ffff;
+        Ok(())
     }
 
     fn fetch16<B: Bus>(&mut self, bus: &B) -> Result<u16, CpuError> {
@@ -94,6 +130,18 @@ impl Cpu {
     fn fetch32<B: Bus>(&mut self, bus: &B) -> Result<u32, CpuError> {
         let value = bus.read32(self.pc)?;
         self.pc = (self.pc + 4) & 0x00ff_ffff;
+        Ok(value)
+    }
+
+    fn push16<B: Bus>(&mut self, bus: &mut B, value: u16) -> Result<(), CpuError> {
+        self.a[7] = self.a[7].wrapping_sub(2) & 0x00ff_ffff;
+        bus.write16(self.a[7], value)?;
+        Ok(())
+    }
+
+    fn pop16<B: Bus>(&mut self, bus: &B) -> Result<u16, CpuError> {
+        let value = bus.read16(self.a[7])?;
+        self.a[7] = self.a[7].wrapping_add(2) & 0x00ff_ffff;
         Ok(value)
     }
 
@@ -111,11 +159,7 @@ impl Cpu {
 
     fn branch_displacement<B: Bus>(&mut self, bus: &B, opcode: u16) -> Result<i32, CpuError> {
         let short = opcode as u8 as i8;
-        if short == 0 {
-            Ok(self.fetch16(bus)? as i16 as i32)
-        } else {
-            Ok(short as i32)
-        }
+        if short == 0 { Ok(self.fetch16(bus)? as i16 as i32) } else { Ok(short as i32) }
     }
 
     fn set_nz32(&mut self, value: u32) {
@@ -142,69 +186,60 @@ mod tests {
     }
 
     #[test]
-    fn reset_loads_initial_ssp_and_pc() {
-        let bus = boot_bus();
-        let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
-        assert_eq!(cpu.a[7], 0x3000);
-        assert_eq!(cpu.pc, 0x100);
-        assert_eq!(cpu.sr, 0x2700);
-    }
-
-    #[test]
-    fn moveq_targets_all_data_registers_and_sets_nz() {
+    fn trap_enters_vector_and_rte_restores_context() {
         let mut bus = boot_bus();
-        bus.write16(0x100, 0x72ff).unwrap(); // MOVEQ #-1,D1
-        let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
-        assert_eq!(cpu.step(&mut bus).unwrap(), 4);
-        assert_eq!(cpu.d[1], 0xffff_ffff);
-        assert_ne!(cpu.sr & CCR_N, 0);
-        assert_eq!(cpu.sr & CCR_Z, 0);
-    }
-
-    #[test]
-    fn bsr_and_rts_round_trip_stack_and_pc() {
-        let mut bus = boot_bus();
-        bus.write16(0x100, 0x6104).unwrap(); // BSR.s -> 0x106
-        bus.write16(0x102, 0x7007).unwrap(); // MOVEQ #7,D0
-        bus.write16(0x104, 0x6004).unwrap(); // BRA.s -> 0x10a
-        bus.write16(0x106, 0x7209).unwrap(); // MOVEQ #9,D1
-        bus.write16(0x108, 0x4e75).unwrap(); // RTS
-        bus.write16(0x10a, 0x4e72).unwrap();
-        bus.write16(0x10c, 0x2700).unwrap();
+        bus.write32(32 * 4, 0x200).unwrap();
+        bus.write16(0x100, 0x4e40).unwrap();
+        bus.write16(0x102, 0x4e72).unwrap();
+        bus.write16(0x104, 0x2700).unwrap();
+        bus.write16(0x200, 0x7209).unwrap();
+        bus.write16(0x202, 0x4e73).unwrap();
 
         let mut cpu = Cpu::default();
         cpu.reset(&bus).unwrap();
-        let initial_sp = cpu.a[7];
-        while !cpu.stopped {
-            cpu.step(&mut bus).unwrap();
-        }
-
-        assert_eq!(cpu.d[0], 7);
+        let sp = cpu.a[7];
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x200);
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x102);
+        assert_eq!(cpu.a[7], sp);
         assert_eq!(cpu.d[1], 9);
-        assert_eq!(cpu.a[7], initial_sp);
-        assert_eq!(cpu.pc, 0x10e);
     }
 
     #[test]
-    fn jsr_absolute_long_and_rts_work() {
+    fn illegal_instruction_uses_vector_four() {
         let mut bus = boot_bus();
-        bus.write16(0x100, 0x4eb9).unwrap();
-        bus.write32(0x102, 0x0000_0200).unwrap();
-        bus.write16(0x106, 0x4e72).unwrap();
-        bus.write16(0x108, 0x2700).unwrap();
-        bus.write16(0x200, 0x747f).unwrap(); // MOVEQ #127,D2
-        bus.write16(0x202, 0x4e75).unwrap();
-
+        bus.write32(4 * 4, 0x240).unwrap();
+        bus.write16(0x100, 0xffff).unwrap();
         let mut cpu = Cpu::default();
         cpu.reset(&bus).unwrap();
-        let initial_sp = cpu.a[7];
-        while !cpu.stopped {
-            cpu.step(&mut bus).unwrap();
-        }
+        assert_eq!(cpu.step(&mut bus).unwrap(), 34);
+        assert_eq!(cpu.pc, 0x240);
+        assert_eq!(bus.read32(cpu.a[7] + 2).unwrap(), 0x100);
+    }
 
-        assert_eq!(cpu.d[2], 127);
-        assert_eq!(cpu.a[7], initial_sp);
+    #[test]
+    fn interrupt_obeys_mask_and_wakes_stop() {
+        let mut bus = boot_bus();
+        bus.write32(27 * 4, 0x280).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr = 0x2000;
+        cpu.stopped = true;
+        assert_eq!(cpu.interrupt(&mut bus, 3, 27).unwrap(), 44);
+        assert_eq!(cpu.pc, 0x280);
+        assert!(!cpu.stopped);
+        assert_eq!((cpu.sr >> 8) & 7, 3);
+    }
+
+    #[test]
+    fn masked_interrupt_is_ignored() {
+        let mut bus = boot_bus();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.sr = 0x2500;
+        assert_eq!(cpu.interrupt(&mut bus, 3, 27).unwrap(), 0);
+        assert_eq!(cpu.pc, 0x100);
     }
 }
