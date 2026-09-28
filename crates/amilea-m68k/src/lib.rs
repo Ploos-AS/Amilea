@@ -43,6 +43,8 @@ pub struct DecodeInfo {
 fn ea_mode_reg(opcode: u16) -> (u8, usize) { (((opcode >> 3) & 7) as u8, (opcode & 7) as usize) }
 fn legal_data_read(mode: u8, reg: usize) -> bool { mode != 1 && !(mode == 7 && reg > 4) }
 fn legal_data_alterable(mode: u8, reg: usize) -> bool { mode != 1 && !(mode == 7 && reg >= 2) }
+fn legal_memory_alterable(mode: u8, reg: usize) -> bool { matches!(mode, 2..=6) || (mode == 7 && reg <= 1) }
+fn legal_control(mode: u8, reg: usize) -> bool { matches!(mode, 2 | 5 | 6) || (mode == 7 && reg <= 3) }
 
 pub fn decode_info(opcode: u16) -> DecodeInfo {
     use InstructionClass::*;
@@ -437,6 +439,7 @@ impl Cpu {
             0x4848..=0x487f => {
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
+                if !legal_control(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
                 let address = self.ea_address(bus, mode, reg)?;
                 self.push32(bus, address)?;
                 Ok(12)
@@ -473,6 +476,7 @@ impl Cpu {
             0x4e80..=0x4ebf => {
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
+                if !legal_control(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
                 let target = self.ea_address(bus, mode, reg)?;
                 let return_pc = self.pc;
                 self.push32(bus, return_pc)?;
@@ -482,6 +486,7 @@ impl Cpu {
             0x4ec0..=0x4eff => {
                 let mode = ((opcode >> 3) & 7) as u8;
                 let reg = (opcode & 7) as usize;
+                if !legal_control(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
                 self.pc = self.ea_address(bus, mode, reg)?;
                 Ok(8)
             }
@@ -826,7 +831,7 @@ impl Cpu {
         let size = decode_size((opcode >> 6) & 3).ok_or(CpuError::UnimplementedOpcode { opcode })?;
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
-        if mode == 1 || (mode == 7 && reg >= 2) { return Err(CpuError::UnimplementedOpcode { opcode }); }
+        if !legal_data_alterable(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
         let target = self.resolve_rmw(bus, size, mode, reg)?;
         let value = self.read_rmw(bus, size, target)?;
         let result = match operation {
@@ -852,7 +857,7 @@ impl Cpu {
     fn exec_tas<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
         let mode = ((opcode >> 3) & 7) as u8;
         let reg = (opcode & 7) as usize;
-        if mode == 1 || (mode == 7 && reg >= 2) { return Err(CpuError::UnimplementedOpcode { opcode }); }
+        if !legal_data_alterable(mode, reg) { return Err(CpuError::IllegalOpcode { opcode }); }
         let target = self.resolve_rmw(bus, Size::Byte, mode, reg)?;
         let value = self.read_rmw(bus, Size::Byte, target)? & 0xff;
         self.set_logic_flags(Size::Byte, value);
@@ -1409,6 +1414,27 @@ mod tests {
     fn decode_metadata_covers_entire_opcode_space_deterministically() {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn control_and_memory_alterable_ea_policies_cover_all_encodings() {
+        for ea in 0u16..64 {
+            let (mode, reg) = ea_mode_reg(ea);
+            assert_eq!(legal_control(mode, reg), matches!(mode, 2 | 5 | 6) || (mode == 7 && reg <= 3));
+            assert_eq!(legal_memory_alterable(mode, reg), matches!(mode, 2..=6) || (mode == 7 && reg <= 1));
+        }
+    }
+
+    #[test]
+    fn invalid_pea_jsr_and_jmp_encodings_enter_illegal_instruction() {
+        for opcode in [0x4848u16, 0x4e88, 0x4ec8] {
+            let mut bus = boot_bus();
+            bus.write32(4 * 4, 0x240).unwrap();
+            bus.write16(0x100, opcode).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.pc, 0x240);
         }
     }
 
