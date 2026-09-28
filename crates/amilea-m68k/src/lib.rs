@@ -14,6 +14,9 @@ const CCR_C: u16 = 0x01;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Size { Byte, Word, Long }
 
+#[derive(Debug, Clone, Copy)]
+enum RmwTarget { DataReg(usize), Memory(u32) }
+
 impl Size {
     fn mask(self) -> u32 { match self { Self::Byte => 0xff, Self::Word => 0xffff, Self::Long => u32::MAX } }
     fn sign(self) -> u32 { match self { Self::Byte => 0x80, Self::Word => 0x8000, Self::Long => 0x8000_0000 } }
@@ -93,7 +96,8 @@ impl Cpu {
                     Size::Word => self.fetch16(bus)? as u32,
                     Size::Long => self.fetch32(bus)?,
                 };
-                let dst = self.read_ea(bus, size, mode, reg)?;
+                let target = self.resolve_rmw(bus, size, mode, reg)?;
+                let dst = self.read_rmw(bus, size, target)?;
                 let result = match family {
                     0x0000 => { let r = dst | immediate; self.set_logic_flags(size, r); r }
                     0x0200 => { let r = dst & immediate; self.set_logic_flags(size, r); r }
@@ -109,7 +113,7 @@ impl Cpu {
                         return Ok(34);
                     }
                 };
-                self.write_ea(bus, size, mode, reg, result)?;
+                self.write_rmw(bus, size, target, result)?;
                 Ok(4)
             }
             0x4200..=0x42bf => {
@@ -152,7 +156,8 @@ impl Cpu {
                 if matches!(opmode, 4 | 5 | 6) {
                     let size = decode_size((opmode - 4) as u16).unwrap();
                     let src = self.d[dn] & size.mask();
-                    let dst = self.read_ea(bus, size, mode, reg)?;
+                    let target = self.resolve_rmw(bus, size, mode, reg)?;
+                    let dst = self.read_rmw(bus, size, target)?;
                     let result = match top {
                         0x8 => { let r = dst | src; self.set_logic_flags(size, r); r }
                         0x9 => self.alu_sub(size, dst, src, true),
@@ -161,7 +166,7 @@ impl Cpu {
                         0xd => self.alu_add(size, dst, src),
                         _ => unreachable!(),
                     };
-                    self.write_ea(bus, size, mode, reg, result)?;
+                    self.write_rmw(bus, size, target, result)?;
                     return Ok(4);
                 }
                 if opmode > 2 {
@@ -605,6 +610,51 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn resolve_rmw<B: Bus>(&mut self, bus: &B, size: Size, mode: u8, reg: usize) -> Result<RmwTarget, CpuError> {
+        Ok(match mode {
+            0 => RmwTarget::DataReg(reg),
+            2 => RmwTarget::Memory(self.a[reg]),
+            3 => {
+                let address = self.a[reg];
+                self.a[reg] = self.a[reg].wrapping_add(size.bytes(reg)) & 0x00ff_ffff;
+                RmwTarget::Memory(address)
+            }
+            4 => {
+                self.a[reg] = self.a[reg].wrapping_sub(size.bytes(reg)) & 0x00ff_ffff;
+                RmwTarget::Memory(self.a[reg])
+            }
+            5 => {
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                RmwTarget::Memory(add_displacement(self.a[reg], displacement))
+            }
+            6 => {
+                let base = self.a[reg];
+                RmwTarget::Memory(self.indexed_address(bus, base)?)
+            }
+            7 if reg == 0 => RmwTarget::Memory(self.fetch16(bus)? as i16 as i32 as u32 & 0x00ff_ffff),
+            7 if reg == 1 => RmwTarget::Memory(self.fetch32(bus)? & 0x00ff_ffff),
+            _ => return Err(CpuError::UnimplementedOpcode { opcode: 0 }),
+        })
+    }
+
+    fn read_rmw<B: Bus>(&self, bus: &B, size: Size, target: RmwTarget) -> Result<u32, CpuError> {
+        match target {
+            RmwTarget::DataReg(reg) => Ok(self.d[reg] & size.mask()),
+            RmwTarget::Memory(address) => self.read_mem(bus, size, address),
+        }
+    }
+
+    fn write_rmw<B: Bus>(&mut self, bus: &mut B, size: Size, target: RmwTarget, value: u32) -> Result<(), CpuError> {
+        match target {
+            RmwTarget::DataReg(reg) => {
+                let mask = size.mask();
+                self.d[reg] = (self.d[reg] & !mask) | (value & mask);
+                Ok(())
+            }
+            RmwTarget::Memory(address) => self.write_mem(bus, size, address, value),
+        }
     }
 
     fn read_mem<B: Bus>(&self, bus: &B, size: Size, address: u32) -> Result<u32, CpuError> {
@@ -1359,6 +1409,64 @@ mod tests {
         assert_eq!(cpu.step(&mut bus).unwrap(), 50);
         assert_eq!(cpu.pc, 0x2a0);
         assert_eq!(bus.read32(cpu.a[7] + 10).unwrap(), 0x8000);
+    }
+
+    #[test]
+    fn rmw_postincrement_updates_address_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xd118).unwrap(); // ADD.B D0,(A0)+
+        bus.write8(0x500, 10).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.d[0] = 5;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 15);
+        assert_eq!(cpu.a[0], 0x501);
+    }
+
+    #[test]
+    fn rmw_predecrement_updates_address_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x9361).unwrap(); // SUB.W D1,-(A1)
+        bus.write16(0x4fe, 10).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[1] = 0x500;
+        cpu.d[1] = 3;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x4fe).unwrap(), 7);
+        assert_eq!(cpu.a[1], 0x4fe);
+    }
+
+    #[test]
+    fn rmw_displacement_consumes_extension_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xd168).unwrap(); // ADD.W D0,4(A0)
+        bus.write16(0x102, 4).unwrap();
+        bus.write16(0x504, 10).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.d[0] = 5;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x504).unwrap(), 15);
+        assert_eq!(cpu.pc, 0x104);
+    }
+
+    #[test]
+    fn immediate_rmw_postincrement_resolves_once() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x0618).unwrap(); // ADDI.B #1,(A0)+
+        bus.write16(0x102, 1).unwrap();
+        bus.write8(0x500, 4).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read8(0x500).unwrap(), 5);
+        assert_eq!(cpu.a[0], 0x501);
+        assert_eq!(cpu.pc, 0x104);
     }
 
     #[test]
