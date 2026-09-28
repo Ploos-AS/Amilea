@@ -6,6 +6,17 @@ use thiserror::Error;
 const CCR_N: u16 = 0x08;
 const CCR_Z: u16 = 0x04;
 const SR_SUPERVISOR: u16 = 0x2000;
+const CCR_V: u16 = 0x02;
+const CCR_C: u16 = 0x01;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Size { Byte, Word, Long }
+
+impl Size {
+    fn mask(self) -> u32 { match self { Self::Byte => 0xff, Self::Word => 0xffff, Self::Long => u32::MAX } }
+    fn sign(self) -> u32 { match self { Self::Byte => 0x80, Self::Word => 0x8000, Self::Long => 0x8000_0000 } }
+    fn bytes(self, reg: usize) -> u32 { match self { Self::Byte if reg == 7 => 2, Self::Byte => 1, Self::Word => 2, Self::Long => 4 } }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
@@ -57,6 +68,21 @@ impl Cpu {
         };
 
         match opcode {
+            0x1000..=0x3fff => {
+                let size = match opcode >> 12 { 1 => Size::Byte, 2 => Size::Long, 3 => Size::Word, _ => unreachable!() };
+                let src_mode = ((opcode >> 3) & 7) as u8;
+                let src_reg = (opcode & 7) as usize;
+                let dst_mode = ((opcode >> 6) & 7) as u8;
+                let dst_reg = ((opcode >> 9) & 7) as usize;
+                if dst_mode == 1 || (size == Size::Byte && src_mode == 1) {
+                    self.enter_exception(bus, 4, instruction_pc)?;
+                    return Ok(34);
+                }
+                let value = self.read_ea(bus, size, src_mode, src_reg)?;
+                self.write_ea(bus, size, dst_mode, dst_reg, value)?;
+                self.set_move_flags(size, value);
+                Ok(4)
+            }
             0x4e71 => Ok(4),
             0x4e75 => { self.pc = self.pop32(bus)?; Ok(16) }
             0x4e73 => {
@@ -160,6 +186,97 @@ impl Cpu {
         self.push16(bus, saved_sr)?;
         self.pc = bus.read32((vector as u32) * 4)? & 0x00ff_ffff;
         Ok(())
+    }
+
+    fn read_ea<B: Bus>(&mut self, bus: &B, size: Size, mode: u8, reg: usize) -> Result<u32, CpuError> {
+        let value = match mode {
+            0 => self.d[reg] & size.mask(),
+            1 => self.a[reg] & size.mask(),
+            2 => self.read_mem(bus, size, self.a[reg])?,
+            3 => {
+                let address = self.a[reg];
+                let value = self.read_mem(bus, size, address)?;
+                self.a[reg] = (self.a[reg] + size.bytes(reg)) & 0x00ff_ffff;
+                value
+            }
+            4 => {
+                self.a[reg] = self.a[reg].wrapping_sub(size.bytes(reg)) & 0x00ff_ffff;
+                self.read_mem(bus, size, self.a[reg])?
+            }
+            5 => {
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                let address = add_displacement(self.a[reg], displacement);
+                self.read_mem(bus, size, address)?
+            }
+            7 if reg == 0 => {
+                let address = self.fetch16(bus)? as i16 as i32 as u32 & 0x00ff_ffff;
+                self.read_mem(bus, size, address)?
+            }
+            7 if reg == 1 => {
+                let address = self.fetch32(bus)? & 0x00ff_ffff;
+                self.read_mem(bus, size, address)?
+            }
+            _ => return Err(BusError::Unmapped { address: self.pc }.into()),
+        };
+        Ok(value)
+    }
+
+    fn write_ea<B: Bus>(&mut self, bus: &mut B, size: Size, mode: u8, reg: usize, value: u32) -> Result<(), CpuError> {
+        match mode {
+            0 => {
+                let mask = size.mask();
+                self.d[reg] = (self.d[reg] & !mask) | (value & mask);
+            }
+            2 => self.write_mem(bus, size, self.a[reg], value)?,
+            3 => {
+                let address = self.a[reg];
+                self.write_mem(bus, size, address, value)?;
+                self.a[reg] = (self.a[reg] + size.bytes(reg)) & 0x00ff_ffff;
+            }
+            4 => {
+                self.a[reg] = self.a[reg].wrapping_sub(size.bytes(reg)) & 0x00ff_ffff;
+                self.write_mem(bus, size, self.a[reg], value)?;
+            }
+            5 => {
+                let displacement = self.fetch16(bus)? as i16 as i32;
+                let address = add_displacement(self.a[reg], displacement);
+                self.write_mem(bus, size, address, value)?;
+            }
+            7 if reg == 0 => {
+                let address = self.fetch16(bus)? as i16 as i32 as u32 & 0x00ff_ffff;
+                self.write_mem(bus, size, address, value)?;
+            }
+            7 if reg == 1 => {
+                let address = self.fetch32(bus)? & 0x00ff_ffff;
+                self.write_mem(bus, size, address, value)?;
+            }
+            _ => return Err(BusError::Unmapped { address: self.pc }.into()),
+        }
+        Ok(())
+    }
+
+    fn read_mem<B: Bus>(&self, bus: &B, size: Size, address: u32) -> Result<u32, CpuError> {
+        Ok(match size {
+            Size::Byte => bus.read8(address)? as u32,
+            Size::Word => bus.read16(address)? as u32,
+            Size::Long => bus.read32(address)?,
+        })
+    }
+
+    fn write_mem<B: Bus>(&self, bus: &mut B, size: Size, address: u32, value: u32) -> Result<(), CpuError> {
+        match size {
+            Size::Byte => bus.write8(address, value as u8)?,
+            Size::Word => bus.write16(address, value as u16)?,
+            Size::Long => bus.write32(address, value)?,
+        }
+        Ok(())
+    }
+
+    fn set_move_flags(&mut self, size: Size, value: u32) {
+        self.sr &= !(CCR_N | CCR_Z | CCR_V | CCR_C);
+        let value = value & size.mask();
+        if value == 0 { self.sr |= CCR_Z; }
+        if value & size.sign() != 0 { self.sr |= CCR_N; }
     }
 
     fn fetch16<B: Bus>(&mut self, bus: &B) -> Result<u16, CpuError> {
@@ -303,6 +420,49 @@ mod tests {
         assert_eq!(cpu.step(&mut bus).unwrap(), 50);
         assert_eq!(cpu.pc, 0x2a0);
         assert_eq!(bus.read32(cpu.a[7] + 2).unwrap(), 0x8000);
+    }
+
+    #[test]
+    fn move_long_register_to_memory_and_back() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x2080).unwrap(); // MOVE.L D0,(A0)
+        bus.write16(0x102, 0x2210).unwrap(); // MOVE.L (A0),D1
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x1234_abcd;
+        cpu.a[0] = 0x500;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read32(0x500).unwrap(), 0x1234_abcd);
+        assert_eq!(cpu.d[1], 0x1234_abcd);
+    }
+
+    #[test]
+    fn move_byte_postincrement_a7_advances_two_bytes() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x101f).unwrap(); // MOVE.B (A7)+,D0
+        bus.write8(0x3000, 0x80).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0] & 0xff, 0x80);
+        assert_eq!(cpu.a[7], 0x3002);
+        assert_ne!(cpu.sr & CCR_N, 0);
+    }
+
+    #[test]
+    fn move_word_with_displacement_uses_shared_ea_engine() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x3168).unwrap(); // MOVE.W 4(A0),8(A0)
+        bus.write16(0x102, 4).unwrap();
+        bus.write16(0x104, 8).unwrap();
+        bus.write16(0x504, 0xbeef).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x500;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read16(0x508).unwrap(), 0xbeef);
+        assert_eq!(cpu.pc, 0x106);
     }
 
     #[test]
