@@ -139,9 +139,9 @@ impl Cpu {
             0x9100..=0x91ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, false),
             0xd100..=0xd1ff if opcode & 0x0130 == 0x0100 => self.exec_addx_subx(bus, opcode, true),
             0xb108..=0xb1ff if opcode & 0x0138 == 0x0108 => self.exec_cmpm(bus, opcode),
-            0xc140..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => Err(CpuError::UnimplementedOpcode { opcode }), // EXG
+            0xc140..=0xc1ff if matches!(opcode & 0x01f8, 0x0140 | 0x0148 | 0x0188) => self.exec_exg(opcode),
             0x80c0..=0x80ff | 0x81c0..=0x81ff => Err(CpuError::UnimplementedOpcode { opcode }), // DIVU/DIVS
-            0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => Err(CpuError::UnimplementedOpcode { opcode }), // MULU/MULS
+            0xc0c0..=0xc0ff | 0xc1c0..=0xc1ff => self.exec_mul(bus, opcode),
             0x8000..=0x8fff | 0x9000..=0x9fff | 0xb000..=0xbfff | 0xc000..=0xcfff | 0xd000..=0xdfff => {
                 let top = opcode >> 12;
                 let opmode = ((opcode >> 6) & 7) as u8;
@@ -620,6 +620,38 @@ impl Cpu {
             _ => return Err(BusError::Unmapped { address: self.pc }.into()),
         }
         Ok(())
+    }
+
+    fn exec_exg(&mut self, opcode: u16) -> Result<u32, CpuError> {
+        let rx = ((opcode >> 9) & 7) as usize;
+        let ry = (opcode & 7) as usize;
+        match opcode & 0x01f8 {
+            0x0140 => self.d.swap(rx, ry),
+            0x0148 => self.a.swap(rx, ry),
+            0x0188 => {
+                let tmp = self.d[rx];
+                self.d[rx] = self.a[ry];
+                self.a[ry] = tmp;
+            }
+            _ => return Err(CpuError::UnimplementedOpcode { opcode }),
+        }
+        Ok(6)
+    }
+
+    fn exec_mul<B: Bus>(&mut self, bus: &B, opcode: u16) -> Result<u32, CpuError> {
+        let signed = opcode & 0x0100 != 0;
+        let dn = ((opcode >> 9) & 7) as usize;
+        let mode = ((opcode >> 3) & 7) as u8;
+        let reg = (opcode & 7) as usize;
+        let src = self.read_ea(bus, Size::Word, mode, reg)? as u16;
+        let result = if signed {
+            (self.d[dn] as u16 as i16 as i32).wrapping_mul(src as i16 as i32) as u32
+        } else {
+            (self.d[dn] as u16 as u32).wrapping_mul(src as u32)
+        };
+        self.d[dn] = result;
+        self.set_logic_flags(Size::Long, result);
+        Ok(70)
     }
 
     fn exec_addx_subx<B: Bus>(&mut self, bus: &mut B, opcode: u16, add: bool) -> Result<u32, CpuError> {
@@ -1596,15 +1628,72 @@ mod tests {
 
 
     #[test]
+    fn exg_supports_data_address_and_mixed_forms_without_changing_ccr() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xc141).unwrap(); // EXG D0,D1
+        bus.write16(0x102, 0xc149).unwrap(); // EXG A0,A1
+        bus.write16(0x104, 0xc189).unwrap(); // EXG D0,A1
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 1;
+        cpu.d[1] = 2;
+        cpu.a[0] = 3;
+        cpu.a[1] = 4;
+        cpu.sr = CCR_X | CCR_N | CCR_C;
+        let sr = cpu.sr;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!((cpu.d[0], cpu.d[1]), (2, 1));
+        cpu.step(&mut bus).unwrap();
+        assert_eq!((cpu.a[0], cpu.a[1]), (4, 3));
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 3);
+        assert_eq!(cpu.a[1], 2);
+        assert_eq!(cpu.sr, sr);
+    }
+
+    #[test]
+    fn mulu_and_muls_produce_32_bit_results_and_preserve_x() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xc0fc).unwrap(); // MULU.W #3,D0
+        bus.write16(0x102, 3).unwrap();
+        bus.write16(0x104, 0xc3fc).unwrap(); // MULS.W #-2,D1
+        bus.write16(0x106, 0xfffe).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0xffff_0004;
+        cpu.d[1] = 0x0000_fffd; // -3
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 12);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_eq!(cpu.sr & (CCR_N | CCR_Z | CCR_V | CCR_C), 0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[1], 6);
+        assert_ne!(cpu.sr & CCR_X, 0);
+        assert_eq!(cpu.sr & (CCR_N | CCR_Z | CCR_V | CCR_C), 0);
+    }
+
+    #[test]
+    fn muls_sets_negative_from_long_result() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0xc1fc).unwrap(); // MULS.W #-2,D0
+        bus.write16(0x102, 0xfffe).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.d[0] = 3;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0xffff_fffa);
+        assert_ne!(cpu.sr & CCR_N, 0);
+    }
+
+
+    #[test]
     fn overlapping_alu_encodings_do_not_execute_as_generic_operations() {
         for opcode in [
             0x8100u16, // SBCD D0,D0
             0xc100,    // ABCD D0,D0
-            0xc140,    // EXG D0,D0
             0x80c0,    // DIVU.W D0,D0
             0x81c0,    // DIVS.W D0,D0
-            0xc0c0,    // MULU.W D0,D0
-            0xc1c0,    // MULS.W D0,D0
         ] {
             let mut bus = boot_bus();
             bus.write16(0x100, opcode).unwrap();
