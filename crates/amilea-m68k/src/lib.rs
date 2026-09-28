@@ -41,7 +41,20 @@ impl Cpu {
 
     pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
         let instruction_pc = self.pc;
-        let opcode = self.fetch16(bus)?;
+        let opcode = match bus.read16(self.pc) {
+            Ok(opcode) => {
+                self.pc = (self.pc + 2) & 0x00ff_ffff;
+                opcode
+            }
+            Err(fault) => {
+                let (vector, address) = match fault {
+                    BusError::AddressError { address } => (3, address),
+                    BusError::Unmapped { address } => (2, address),
+                };
+                self.enter_access_fault(bus, vector, instruction_pc, 0, address, true, true)?;
+                return Ok(50);
+            }
+        };
 
         match opcode {
             0x4e71 => Ok(4),
@@ -106,6 +119,34 @@ impl Cpu {
         self.sr = (self.sr & !0x0700) | ((level as u16) << 8);
         self.enter_exception_with_sr(bus, vector, saved_pc, saved_sr)?;
         Ok(44)
+    }
+
+    fn enter_access_fault<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        vector: u8,
+        saved_pc: u32,
+        instruction: u16,
+        fault_address: u32,
+        read: bool,
+        instruction_access: bool,
+    ) -> Result<(), CpuError> {
+        let saved_sr = self.sr;
+        self.sr |= SR_SUPERVISOR;
+        let function_code = if saved_sr & SR_SUPERVISOR != 0 {
+            if instruction_access { 6 } else { 5 }
+        } else if instruction_access { 2 } else { 1 };
+        let mut ssw = function_code;
+        if read { ssw |= 1 << 4; }
+        if !instruction_access { ssw |= 1 << 3; }
+
+        self.push32(bus, saved_pc)?;
+        self.push16(bus, saved_sr)?;
+        self.push16(bus, instruction)?;
+        self.push32(bus, fault_address)?;
+        self.push16(bus, ssw)?;
+        self.pc = bus.read32((vector as u32) * 4)? & 0x00ff_ffff;
+        Ok(())
     }
 
     fn enter_exception<B: Bus>(&mut self, bus: &mut B, vector: u8, saved_pc: u32) -> Result<(), CpuError> {
@@ -231,6 +272,37 @@ mod tests {
         assert_eq!(cpu.pc, 0x280);
         assert!(!cpu.stopped);
         assert_eq!((cpu.sr >> 8) & 7, 3);
+    }
+
+    #[test]
+    fn odd_instruction_fetch_enters_address_error_vector() {
+        let mut bus = boot_bus();
+        bus.write32(3 * 4, 0x2c0).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.pc = 0x101;
+        let initial_sp = cpu.a[7];
+
+        assert_eq!(cpu.step(&mut bus).unwrap(), 50);
+        assert_eq!(cpu.pc, 0x2c0);
+        assert_eq!(cpu.a[7], initial_sp - 14);
+        assert_eq!(bus.read32(cpu.a[7] + 2).unwrap(), 0x101);
+        assert_eq!(bus.read16(cpu.a[7] + 6).unwrap(), 0);
+        assert_eq!(bus.read32(cpu.a[7] + 10).unwrap(), 0x101);
+        assert_eq!(bus.read16(cpu.a[7]).unwrap() & 0x001f, 0x0016);
+    }
+
+    #[test]
+    fn unmapped_instruction_fetch_enters_bus_error_vector() {
+        let mut bus = boot_bus();
+        bus.write32(2 * 4, 0x2a0).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.pc = 0x8000;
+
+        assert_eq!(cpu.step(&mut bus).unwrap(), 50);
+        assert_eq!(cpu.pc, 0x2a0);
+        assert_eq!(bus.read32(cpu.a[7] + 2).unwrap(), 0x8000);
     }
 
     #[test]
