@@ -73,6 +73,13 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
         0x4600..=0x46bf => (Alu, "NOT"),
         0x4800..=0x483f => (Bcd, "NBCD"),
         0x4ac0..=0x4aff if opcode != 0x4afc => (System, "TAS"),
+        0x4a00..=0x4abf => (System, "TST"),
+        0x4000..=0x4fff if opcode & 0xf1c0 == 0x41c0 => (Control, "LEA"),
+        0x4840..=0x4847 => (Alu, "SWAP"),
+        0x4880..=0x4887 => (Alu, "EXT.W"),
+        0x48c0..=0x48c7 => (Alu, "EXT.L"),
+        0x4e50..=0x4e57 => (Control, "LINK"),
+        0x4e58..=0x4e5f => (Control, "UNLK"),
         0x4000..=0x4fff if opcode & 0xf1c0 == 0x4180 => (System, "CHK"),
         0x6000..=0x6fff => (Branch, "Bcc/BSR/BRA"),
         0x7000..=0x7fff => (Move, "MOVEQ"),
@@ -105,6 +112,16 @@ pub fn decode_info(opcode: u16) -> DecodeInfo {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::DataAlterable, if legal_data_alterable(mode, reg) { Legality::Legal } else { Legality::Illegal })
         }
+        "TST" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::DataRead, if legal_data_read(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
+        "LEA" => {
+            let (mode, reg) = ea_mode_reg(opcode);
+            (EaPolicy::Control, if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal })
+        }
+        "SWAP" | "EXT.W" | "EXT.L" | "LINK" | "UNLK" =>
+            (EaPolicy::None, Legality::Legal),
         "MOVE-SR-EA" => {
             let (mode, reg) = ea_mode_reg(opcode);
             (EaPolicy::DataAlterable, if legal_data_alterable(mode, reg) { Legality::Legal } else { Legality::Illegal })
@@ -1483,6 +1500,30 @@ mod tests {
     fn decode_metadata_covers_entire_opcode_space_deterministically() {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
+        }
+    }
+
+    #[test]
+    fn lea_metadata_uses_control_policy_for_all_eas() {
+        for dst in 0u16..8 {
+            for ea in 0u16..64 {
+                let opcode = 0x41c0 | (dst << 9) | ea;
+                let (mode, reg) = ea_mode_reg(opcode);
+                let expected = if legal_control(mode, reg) { Legality::Legal } else { Legality::Illegal };
+                assert_eq!(decode_info(opcode).legality, expected, "opcode {opcode:04x}");
+            }
+        }
+    }
+
+    #[test]
+    fn swap_pea_ext_decode_boundaries_do_not_overlap() {
+        for reg in 0u16..8 {
+            assert_eq!(decode_info(0x4840 | reg).mnemonic, "SWAP");
+            assert_eq!(decode_info(0x4880 | reg).mnemonic, "EXT.W");
+            assert_eq!(decode_info(0x48c0 | reg).mnemonic, "EXT.L");
+        }
+        for opcode in [0x4850u16, 0x4868, 0x4870, 0x4878] {
+            assert_eq!(decode_info(opcode).mnemonic, "PEA");
         }
     }
 
