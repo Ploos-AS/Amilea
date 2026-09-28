@@ -26,6 +26,8 @@ pub struct Cpu {
     pub pc: u32,
     pub sr: u16,
     pub stopped: bool,
+    pub usp: u32,
+    pub ssp: u32,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -36,7 +38,7 @@ pub enum CpuError {
 
 impl Default for Cpu {
     fn default() -> Self {
-        Self { d: [0; 8], a: [0; 8], pc: 0, sr: 0x2700, stopped: false }
+        Self { d: [0; 8], a: [0; 8], pc: 0, sr: 0x2700, stopped: false, usp: 0, ssp: 0 }
     }
 }
 
@@ -46,7 +48,9 @@ impl Cpu {
         self.a = [0; 8];
         self.sr = 0x2700;
         self.stopped = false;
-        self.a[7] = bus.read32(0)?;
+        self.ssp = bus.read32(0)?;
+        self.usp = 0;
+        self.a[7] = self.ssp;
         self.pc = bus.read32(4)?;
         Ok(())
     }
@@ -270,13 +274,42 @@ impl Cpu {
             }
             0x4e71 => Ok(4),
             0x4e75 => { self.pc = self.pop32(bus)?; Ok(16) }
+            0x4e60..=0x4e67 => {
+                if !self.supervisor() {
+                    self.enter_exception(bus, 8, instruction_pc)?;
+                    return Ok(34);
+                }
+                let reg = (opcode & 7) as usize;
+                self.usp = self.a[reg];
+                Ok(4)
+            }
+            0x4e68..=0x4e6f => {
+                if !self.supervisor() {
+                    self.enter_exception(bus, 8, instruction_pc)?;
+                    return Ok(34);
+                }
+                let reg = (opcode & 7) as usize;
+                self.a[reg] = self.usp;
+                Ok(4)
+            }
             0x4e73 => {
-                self.sr = self.pop16(bus)?;
-                self.pc = self.pop32(bus)?;
+                if !self.supervisor() {
+                    self.enter_exception(bus, 8, instruction_pc)?;
+                    return Ok(34);
+                }
+                let restored_sr = self.pop16(bus)?;
+                let restored_pc = self.pop32(bus)?;
+                self.set_sr(restored_sr);
+                self.pc = restored_pc;
                 Ok(20)
             }
             0x4e72 => {
-                self.sr = self.fetch16(bus)?;
+                if !self.supervisor() {
+                    self.enter_exception(bus, 8, instruction_pc)?;
+                    return Ok(34);
+                }
+                let new_sr = self.fetch16(bus)?;
+                self.set_sr(new_sr);
                 self.stopped = true;
                 Ok(4)
             }
@@ -373,7 +406,7 @@ impl Cpu {
         instruction_access: bool,
     ) -> Result<(), CpuError> {
         let saved_sr = self.sr;
-        self.sr |= SR_SUPERVISOR;
+        self.enter_supervisor();
         let function_code = if saved_sr & SR_SUPERVISOR != 0 {
             if instruction_access { 6 } else { 5 }
         } else if instruction_access { 2 } else { 1 };
@@ -396,11 +429,34 @@ impl Cpu {
     }
 
     fn enter_exception_with_sr<B: Bus>(&mut self, bus: &mut B, vector: u8, saved_pc: u32, saved_sr: u16) -> Result<(), CpuError> {
-        self.sr |= SR_SUPERVISOR;
+        self.enter_supervisor();
         self.push32(bus, saved_pc)?;
         self.push16(bus, saved_sr)?;
         self.pc = bus.read32((vector as u32) * 4)? & 0x00ff_ffff;
         Ok(())
+    }
+
+    fn supervisor(&self) -> bool { self.sr & SR_SUPERVISOR != 0 }
+
+    fn enter_supervisor(&mut self) {
+        if !self.supervisor() {
+            self.usp = self.a[7];
+            self.a[7] = self.ssp;
+        }
+        self.sr |= SR_SUPERVISOR;
+    }
+
+    fn set_sr(&mut self, value: u16) {
+        let was_supervisor = self.supervisor();
+        let will_supervisor = value & SR_SUPERVISOR != 0;
+        if was_supervisor && !will_supervisor {
+            self.ssp = self.a[7];
+            self.a[7] = self.usp;
+        } else if !was_supervisor && will_supervisor {
+            self.usp = self.a[7];
+            self.a[7] = self.ssp;
+        }
+        self.sr = value;
     }
 
     fn indexed_address<B: Bus>(&mut self, bus: &B, base: u32) -> Result<u32, CpuError> {
@@ -1123,6 +1179,61 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[1], 0xffff_ff80);
         assert_ne!(cpu.sr & CCR_X, 0);
+    }
+
+    #[test]
+    fn user_exception_switches_to_ssp_and_rte_restores_usp() {
+        let mut bus = boot_bus();
+        bus.write32(32 * 4, 0x200).unwrap();
+        bus.write16(0x100, 0x4e40).unwrap(); // TRAP #0
+        bus.write16(0x200, 0x4e73).unwrap(); // RTE
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.ssp = 0x3000;
+        cpu.usp = 0x2800;
+        cpu.a[7] = cpu.usp;
+        cpu.sr = 0x0000;
+        cpu.step(&mut bus).unwrap();
+        assert!(cpu.supervisor());
+        assert_eq!(cpu.usp, 0x2800);
+        assert_eq!(cpu.a[7], 0x2ffa);
+        cpu.step(&mut bus).unwrap();
+        assert!(!cpu.supervisor());
+        assert_eq!(cpu.a[7], 0x2800);
+        assert_eq!(cpu.ssp, 0x3000);
+        assert_eq!(cpu.pc, 0x102);
+    }
+
+    #[test]
+    fn privileged_instructions_trap_from_user_mode() {
+        let mut bus = boot_bus();
+        bus.write32(8 * 4, 0x240).unwrap();
+        bus.write16(0x100, 0x4e72).unwrap(); // STOP
+        bus.write16(0x102, 0x2700).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.ssp = 0x3000;
+        cpu.usp = 0x2800;
+        cpu.a[7] = cpu.usp;
+        cpu.sr = 0;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc, 0x240);
+        assert!(!cpu.stopped);
+        assert_eq!(cpu.a[7], 0x2ffa);
+    }
+
+    #[test]
+    fn move_usp_roundtrips_in_supervisor_mode() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4e60).unwrap(); // MOVE A0,USP
+        bus.write16(0x102, 0x4e69).unwrap(); // MOVE USP,A1
+        let mut cpu = Cpu::default();
+        cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x1234_5678;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.usp, 0x1234_5678);
+        assert_eq!(cpu.a[1], 0x1234_5678);
     }
 
     #[test]
