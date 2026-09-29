@@ -1590,6 +1590,41 @@ mod tests {
     }
 
     #[test]
+    fn movem_predecrement_fault_preserves_completed_transfer_and_progress() {
+        let mut bus = RamBus::new(0x108);
+        bus.write32(0, 0x0000_0108).unwrap();
+        bus.write32(4, 0x0000_0100).unwrap();
+        bus.write16(0x100, 0x48e0).unwrap();
+        bus.write16(0x102, 0x0003).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x010c;
+        cpu.a[7] = 0x1122_3344;
+        cpu.a[6] = 0x5566_7788;
+        let err = cpu.step(&mut bus).unwrap_err();
+        assert!(matches!(err, CpuError::DataAccess { read: false, .. }));
+        assert_eq!(cpu.a[0], 0x0104);
+        assert_eq!(bus.read32(0x108).unwrap_err(), BusError::Unmapped { address: 0x108 });
+        assert_eq!(bus.read32(0x104).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn movem_postincrement_fault_does_not_commit_final_base_update() {
+        let mut bus = RamBus::new(0x108);
+        bus.write32(0, 0x0000_0100).unwrap();
+        bus.write32(4, 0x0000_0100).unwrap();
+        bus.write16(0x100, 0x4cd8).unwrap();
+        bus.write16(0x102, 0x0003).unwrap();
+        bus.write32(0x104, 0x1122_3344).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x0104;
+        let err = cpu.step(&mut bus).unwrap_err();
+        assert!(matches!(err, CpuError::DataAccess { read: true, .. }));
+        assert_eq!(cpu.d[0], 0x1122_3344);
+        assert_eq!(cpu.d[1], 0);
+        assert_eq!(cpu.a[0], 0x0104);
+    }
+
+    #[test]
     fn movem_predecrement_base_register_stores_decremented_value() {
         let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
         cpu.a[7] = 0x0300;
