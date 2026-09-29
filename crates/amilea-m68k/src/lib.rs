@@ -541,6 +541,8 @@ impl Cpu {
                 self.set_logic_flags(Size::Long, value);
                 Ok(4)
             }
+            0x4880..=0x48ff => self.exec_movem(bus, opcode, false),
+            0x4c80..=0x4cff => self.exec_movem(bus, opcode, true),
             0x4e50..=0x4e57 => {
                 let reg = (opcode & 7) as usize;
                 let displacement = self.fetch16(bus)? as i16 as i32;
@@ -1064,6 +1066,43 @@ impl Cpu {
         Ok(6 + 2 * count)
     }
 
+    fn exec_movem<B: Bus>(&mut self, bus: &mut B, opcode: u16, mem_to_regs: bool) -> Result<u32, CpuError> {
+        let mode = ((opcode >> 3) & 7) as u8;
+        let reg = (opcode & 7) as usize;
+        let long = opcode & 0x0040 != 0;
+        if if mem_to_regs { !legal_movem_from_memory(mode, reg) } else { !legal_movem_to_memory(mode, reg) } {
+            return Err(CpuError::IllegalOpcode { opcode });
+        }
+        let mask = self.fetch16(bus)?;
+        let size = if long { Size::Long } else { Size::Word };
+        let step = if long { 4 } else { 2 };
+        if !mem_to_regs && mode == 4 {
+            for bit in 0..16 {
+                if mask & (1 << bit) == 0 { continue; }
+                self.a[reg] = self.a[reg].wrapping_sub(step) & 0x00ff_ffff;
+                let value = if bit < 8 { self.a[7 - bit] } else { self.d[15 - bit] };
+                self.write_mem(bus, size, self.a[reg], value)?;
+            }
+        } else {
+            let mut address = self.ea_address(bus, mode, reg)?;
+            for bit in 0..16 {
+                if mask & (1 << bit) == 0 { continue; }
+                if mem_to_regs {
+                    let raw = self.read_mem(bus, size, address)?;
+                    let value = if long { raw } else { raw as u16 as i16 as i32 as u32 };
+                    if bit < 8 { self.d[bit] = value; } else { self.a[bit - 8] = value; }
+                } else {
+                    let value = if bit < 8 { self.d[bit] } else { self.a[bit - 8] };
+                    self.write_mem(bus, size, address, value)?;
+                }
+                address = address.wrapping_add(step) & 0x00ff_ffff;
+            }
+            if mem_to_regs && mode == 3 { self.a[reg] = address; }
+        }
+        let count = mask.count_ones();
+        Ok(8 + count * if long { 8 } else { 4 })
+    }
+
     fn exec_movep<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
         let dn = ((opcode >> 9) & 7) as usize;
         let an = (opcode & 7) as usize;
@@ -1522,6 +1561,36 @@ mod tests {
         for opcode in 0u16..=u16::MAX {
             assert_eq!(decode_info(opcode), decode_info(opcode));
         }
+    }
+
+    #[test]
+    fn movem_long_registers_to_memory_uses_forward_order() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x1122_3344; cpu.d[1] = 0x5566_7788; cpu.a[0] = 0x0200;
+        bus.write16(0x100, 0x48d0).unwrap(); bus.write16(0x102, 0x0003).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read32(0x200).unwrap(), 0x1122_3344);
+        assert_eq!(bus.read32(0x204).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn movem_long_predecrement_uses_reversed_mask_order() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.d[0] = 0x1122_3344; cpu.a[1] = 0x5566_7788; cpu.a[7] = 0x0300;
+        bus.write16(0x100, 0x48e7).unwrap(); bus.write16(0x102, 0x4080).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[7], 0x02f8);
+        assert_eq!(bus.read32(0x2f8).unwrap(), 0x1122_3344);
+        assert_eq!(bus.read32(0x2fc).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn movem_word_postincrement_sign_extends_registers() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x0200; bus.write16(0x200, 0x8001).unwrap(); bus.write16(0x202, 0x7fff).unwrap();
+        bus.write16(0x100, 0x4c98).unwrap(); bus.write16(0x102, 0x0101).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0xffff_8001); assert_eq!(cpu.a[0], 0x0204); assert_eq!(cpu.a[0], 0x0204);
     }
 
     #[test]
