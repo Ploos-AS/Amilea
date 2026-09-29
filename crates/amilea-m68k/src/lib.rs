@@ -1080,7 +1080,12 @@ impl Cpu {
             for bit in 0..16 {
                 if mask & (1 << bit) == 0 { continue; }
                 self.a[reg] = self.a[reg].wrapping_sub(step) & 0x00ff_ffff;
-                let value = if bit < 8 { self.a[7 - bit] } else { self.d[15 - bit] };
+                let value = if bit < 8 {
+                    let source = 7 - bit;
+                    if source == reg { self.a[reg] } else { self.a[source] }
+                } else {
+                    self.d[15 - bit]
+                };
                 self.write_mem(bus, size, self.a[reg], value)?;
             }
         } else {
@@ -1582,6 +1587,30 @@ mod tests {
         assert_eq!(cpu.a[7], 0x02f8);
         assert_eq!(bus.read32(0x2f8).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x2fc).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn movem_predecrement_base_register_stores_decremented_value() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[7] = 0x0300;
+        bus.write16(0x100, 0x48e7).unwrap();
+        bus.write16(0x102, 0x0001).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.a[7], 0x02fc);
+        assert_eq!(bus.read32(0x02fc).unwrap(), 0x0000_02fc);
+    }
+
+    #[test]
+    fn movem_postincrement_base_register_finishes_at_end_even_if_loaded() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x0200;
+        bus.write32(0x200, 0xdead_beef).unwrap();
+        bus.write32(0x204, 0x1122_3344).unwrap();
+        bus.write16(0x100, 0x4cd8).unwrap();
+        bus.write16(0x102, 0x0101).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.d[0], 0xdead_beef);
+        assert_eq!(cpu.a[0], 0x0208);
     }
 
     #[test]
