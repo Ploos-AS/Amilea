@@ -8,4 +8,5 @@ repository.workspace = true
 
 [dependencies]
 amilea-bus.workspace = true
+amilea-cia.workspace = true
 thiserror.workspace = true
