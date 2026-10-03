@@ -1,6 +1,7 @@
 //! Import external emulator configuration without inheriting emulator runtime policy.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,19 @@ pub enum VideoStandard { Pal, Ntsc }
 pub struct RomReference { pub path: String }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaReference { pub path: String }
+
+fn resolve_config_path(value: &str, config_dir: &Path) -> String {
+    let path=if let Some(rest)=value.strip_prefix("$CONFIG/").or_else(|| value.strip_prefix("$CONFIG\\")) {
+        config_dir.join(rest)
+    } else {
+        let candidate=PathBuf::from(value);
+        if candidate.is_absolute() { candidate } else { config_dir.join(candidate) }
+    };
+    path.to_string_lossy().into_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmileaMachineConfig {
     pub model: String,
     pub cpu: CpuModel,
@@ -36,13 +50,15 @@ pub struct AmileaMachineConfig {
     pub slow_memory_kib: u32,
     pub fast_memory_kib: u32,
     pub rom: Option<RomReference>,
+    pub floppies: Vec<MediaReference>,
+    pub hard_drives: Vec<MediaReference>,
 }
 
 impl Default for AmileaMachineConfig {
     fn default() -> Self {
         Self { model:"A500".into(), cpu:CpuModel::M68000, chipset:Chipset::Ocs,
             video:VideoStandard::Pal, chip_memory_kib:512, slow_memory_kib:0,
-            fast_memory_kib:0, rom:None }
+            fast_memory_kib:0, rom:None, floppies:Vec::new(), hard_drives:Vec::new() }
     }
 }
 
@@ -60,6 +76,10 @@ pub enum NormalizeError {
 
 impl FsUaeConfig {
     pub fn normalize(&self) -> Result<AmileaMachineConfig, NormalizeError> {
+        self.normalize_at(Path::new("."))
+    }
+
+    pub fn normalize_at(&self, config_dir: &Path) -> Result<AmileaMachineConfig, NormalizeError> {
         let model=self.amiga_model.as_deref().unwrap_or("A500").to_ascii_uppercase();
         let mut out=match model.as_str() {
             "A500" => AmileaMachineConfig::default(),
@@ -96,7 +116,9 @@ impl FsUaeConfig {
                 _ => return Err(NormalizeError::UnsupportedVideo { video:video.into() }),
             };
         }
-        out.rom=self.kickstart_file.as_ref().map(|path| RomReference { path:path.clone() });
+        out.rom=self.kickstart_file.as_ref().map(|path| RomReference { path:resolve_config_path(path,config_dir) });
+        out.floppies=self.floppies.iter().map(|path| MediaReference { path:resolve_config_path(path,config_dir) }).collect();
+        out.hard_drives=self.hard_drives.iter().map(|path| MediaReference { path:resolve_config_path(path,config_dir) }).collect();
         Ok(out)
     }
 }
@@ -113,6 +135,8 @@ pub struct FsUaeConfig {
     pub kickstart_file: Option<String>,
     pub options: BTreeMap<String, String>,
     pub diagnostics: Vec<ImportedOption>,
+    pub floppies: Vec<String>,
+    pub hard_drives: Vec<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -150,6 +174,8 @@ pub fn parse_fs_uae(input: &str) -> Result<FsUaeConfig, ConfigError> {
             "chipset" => { config.chipset=Some(value.clone()); ImportStatus::Supported }
             "video_standard" => { config.video=Some(value.clone()); ImportStatus::Supported }
             "kickstart_file" => { config.kickstart_file=Some(value.clone()); ImportStatus::Supported }
+            key if key.starts_with("floppy_drive_") => { config.floppies.push(value.clone()); ImportStatus::Supported }
+            key if key.starts_with("hard_drive_") => { config.hard_drives.push(value.clone()); ImportStatus::Supported }
             "fullscreen" | "window_width" | "window_height" => ImportStatus::Ignored,
             key if key.starts_with("uae_") => ImportStatus::Unsupported,
             _ => ImportStatus::Unknown,
@@ -223,6 +249,22 @@ mod tests {
         assert_eq!(parse_fs_uae("cpu=68080").unwrap().normalize(),Err(NormalizeError::UnsupportedCpu{cpu:"68080".into()}));
         assert_eq!(parse_fs_uae("chipset=AAA").unwrap().normalize(),Err(NormalizeError::UnsupportedChipset{chipset:"AAA".into()}));
         assert_eq!(parse_fs_uae("video_standard=SECAM").unwrap().normalize(),Err(NormalizeError::UnsupportedVideo{video:"SECAM".into()}));
+    }
+
+    #[test]
+    fn config_relative_paths_and_boot_media_are_normalized() {
+        let imported=parse_fs_uae("kickstart_file=$CONFIG/roms/kick.rom\nfloppy_drive_0=disks/workbench.adf\nhard_drive_0=$CONFIG/hdd/system.hdf\n").unwrap();
+        let machine=imported.normalize_at(Path::new("/configs/a500")).unwrap();
+        assert_eq!(machine.rom,Some(RomReference{path:"/configs/a500/roms/kick.rom".into()}));
+        assert_eq!(machine.floppies,vec![MediaReference{path:"/configs/a500/disks/workbench.adf".into()}]);
+        assert_eq!(machine.hard_drives,vec![MediaReference{path:"/configs/a500/hdd/system.hdf".into()}]);
+    }
+
+    #[test]
+    fn absolute_media_paths_are_preserved() {
+        let imported=parse_fs_uae("floppy_drive_0=/media/demo.adf\n").unwrap();
+        let machine=imported.normalize_at(Path::new("/configs")).unwrap();
+        assert_eq!(machine.floppies[0].path,"/media/demo.adf");
     }
 
     #[test]
