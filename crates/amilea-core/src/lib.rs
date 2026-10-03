@@ -8,6 +8,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CpuModel { M68000, M68010, M68020, M68030, M68040, M68060 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Chipset { Ocs, Ecs, Aga }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoStandard {
     Pal,
     Ntsc,
@@ -15,15 +21,23 @@ pub enum VideoStandard {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineConfig {
+    pub cpu: CpuModel,
+    pub chipset: Chipset,
     pub video: VideoStandard,
     pub chip_ram_bytes: usize,
+    pub slow_ram_bytes: usize,
+    pub fast_ram_bytes: usize,
 }
 
 impl Default for MachineConfig {
     fn default() -> Self {
         Self {
+            cpu: CpuModel::M68000,
+            chipset: Chipset::Ocs,
             video: VideoStandard::Pal,
             chip_ram_bytes: 512 * 1024,
+            slow_ram_bytes: 0,
+            fast_ram_bytes: 0,
         }
     }
 }
@@ -125,6 +139,9 @@ impl Amilea {
         h.update(self.cycle.to_le_bytes());
         h.update(self.accumulator.to_le_bytes());
         h.update((self.config.chip_ram_bytes as u64).to_le_bytes());
+        h.update((self.config.slow_ram_bytes as u64).to_le_bytes());
+        h.update((self.config.fast_ram_bytes as u64).to_le_bytes());
+        h.update([self.config.cpu as u8, self.config.chipset as u8]);
         h.update([match self.config.video {
             VideoStandard::Pal => 0,
             VideoStandard::Ntsc => 1,
@@ -138,6 +155,10 @@ impl Amilea {
 
 fn seed(config: &MachineConfig) -> u64 {
     (config.chip_ram_bytes as u64)
+        ^ (config.slow_ram_bytes as u64).rotate_left(7)
+        ^ (config.fast_ram_bytes as u64).rotate_left(17)
+        ^ ((config.cpu as u64) << 40)
+        ^ ((config.chipset as u64) << 48)
         ^ match config.video {
             VideoStandard::Pal => 0x5041_4c00_0000_0001,
             VideoStandard::Ntsc => 0x4e54_5343_0000_0001,
@@ -200,6 +221,7 @@ mod tests {
         let mut replayed = Amilea::new(MachineConfig {
             video: VideoStandard::Ntsc,
             chip_ram_bytes: 1024 * 1024,
+            ..MachineConfig::default()
         });
         replayed.restore(&checkpoint).unwrap();
         replayed.inject(InputEvent::Joystick {
