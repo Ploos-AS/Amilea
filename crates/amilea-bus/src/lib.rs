@@ -70,92 +70,83 @@ pub trait Bus {
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError>;
 
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
-        let address = mask(address);
-        require_even(address)?;
-        Ok(u16::from_be_bytes([
-            self.read8(address)?,
-            self.read8(mask(address + 1))?,
-        ]))
+        match self.inner.read16(address) {
+            Ok(value) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Read, address: mask(address), size: 2, value: Some(value as u32), fault: None });
+                Ok(value)
+            }
+            Err(error) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Read, address: mask(address), size: 2, value: None, fault: Some((&error).into()) });
+                Err(error)
+            }
+        }
     }
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
-        let address = mask(address);
-        require_even(address)?;
-        Ok(u32::from_be_bytes([
-            self.read8(address)?,
-            self.read8(mask(address + 1))?,
-            self.read8(mask(address + 2))?,
-            self.read8(mask(address + 3))?,
-        ]))
+        match self.inner.read32(address) {
+            Ok(value) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Read, address: mask(address), size: 4, value: Some(value), fault: None });
+                Ok(value)
+            }
+            Err(error) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Read, address: mask(address), size: 4, value: None, fault: Some((&error).into()) });
+                Err(error)
+            }
+        }
     }
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
-        let address = mask(address);
-        require_even(address)?;
-        let bytes = value.to_be_bytes();
-        self.write8(address, bytes[0])?;
-        self.write8(mask(address + 1), bytes[1])
+        match self.inner.write16(address, value) {
+            Ok(()) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Write, address: mask(address), size: 2, value: Some(value as u32), fault: None });
+                Ok(())
+            }
+            Err(error) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Write, address: mask(address), size: 2, value: Some(value as u32), fault: Some((&error).into()) });
+                Err(error)
+            }
+        }
     }
 
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
-        let address = mask(address);
-        require_even(address)?;
-        for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
-            self.write8(mask(address + offset as u32), byte)?;
+        match self.inner.write32(address, value) {
+            Ok(()) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Write, address: mask(address), size: 4, value: Some(value), fault: None });
+                Ok(())
+            }
+            Err(error) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Write, address: mask(address), size: 4, value: Some(value), fault: Some((&error).into()) });
+                Err(error)
+            }
         }
-        Ok(())
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct RamBus {
-    ram: Vec<u8>,
-}
-
-impl RamBus {
-    pub fn new(size: usize) -> Self {
-        Self { ram: vec![0; size] }
-    }
-}
-
-impl Bus for RamBus {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
-        let address = mask(address);
-        self.ram
-            .get(address as usize)
-            .copied()
-            .ok_or(BusError::Unmapped { address })
+        match self.inner.read8(address) {
+            Ok(value) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Read, address: mask(address), size: 1, value: Some(value as u32), fault: None });
+                Ok(value)
+            }
+            Err(error) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Read, address: mask(address), size: 1, value: None, fault: Some((&error).into()) });
+                Err(error)
+            }
+        }
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
-        let address = mask(address);
-        let cell = self
-            .ram
-            .get_mut(address as usize)
-            .ok_or(BusError::Unmapped { address })?;
-        *cell = value;
-        Ok(())
-    }
-}
-
-pub struct ObservedBus<'a, B, O> {
-    inner: &'a mut B,
-    observer: &'a mut O,
-    master: BusMaster,
-    cycle: u64,
-}
-
-impl<'a, B, O> ObservedBus<'a, B, O> {
-    pub fn new(inner: &'a mut B, observer: &'a mut O, master: BusMaster, cycle: u64) -> Self {
-        Self { inner, observer, master, cycle }
+        match self.inner.write8(address, value) {
+            Ok(()) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Write, address: mask(address), size: 1, value: Some(value as u32), fault: None });
+                Ok(())
+            }
+            Err(error) => {
+                self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Write, address: mask(address), size: 1, value: Some(value as u32), fault: Some((&error).into()) });
+                Err(error)
+            }
+        }
     }
 
-    pub fn set_cycle(&mut self, cycle: u64) {
-        self.cycle = cycle;
-    }
-}
-
-impl<B: Bus, O: BusObserver> Bus for ObservedBus<'_, B, O> {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         let value = self.inner.read8(address)?;
         self.observer.observe(BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Read, address: mask(address), size: 1, value: Some(value as u32), fault: None });
@@ -224,8 +215,27 @@ mod tests {
             let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event), BusMaster::Cpu, 0);
             observed.write32(2, 0x1234_abcd).unwrap();
         }
-        assert_eq!(events, vec![BusEvent { cycle: self.cycle, master: self.master, access: BusAccess::Write, address: 2, size: 4, value: Some(0x1234_abcd), fault: None }]);
+        assert_eq!(events, vec![BusEvent { cycle: 0, master: BusMaster::Cpu, access: BusAccess::Write, address: 2, size: 4, value: Some(0x1234_abcd), fault: None }]);
         assert_eq!(bus.read32(2).unwrap(), 0x1234_abcd);
+    }
+
+    #[test]
+    fn observed_bus_records_failed_write_with_attempted_value() {
+        let mut bus = RamBus::new(4);
+        let mut events = Vec::new();
+        {
+            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event), BusMaster::Blitter, 91);
+            assert_eq!(observed.write32(4, 0xdead_beef), Err(BusError::Unmapped { address: 4 }));
+        }
+        assert_eq!(events, vec![BusEvent {
+            cycle: 91,
+            master: BusMaster::Blitter,
+            access: BusAccess::Write,
+            address: 4,
+            size: 4,
+            value: Some(0xdead_beef),
+            fault: Some(BusFault::Unmapped),
+        }]);
     }
 
     #[test]
