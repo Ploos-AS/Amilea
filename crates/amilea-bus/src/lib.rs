@@ -35,10 +35,10 @@ impl<F: FnMut(BusEvent)> BusObserver for F {
 }
 
 pub trait Bus {
-    fn read8(&self, address: u32) -> Result<u8, BusError>;
+    fn read8(&mut self, address: u32) -> Result<u8, BusError>;
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError>;
 
-    fn read16(&self, address: u32) -> Result<u16, BusError> {
+    fn read16(&mut self, address: u32) -> Result<u16, BusError> {
         let address = mask(address);
         require_even(address)?;
         Ok(u16::from_be_bytes([
@@ -47,7 +47,7 @@ pub trait Bus {
         ]))
     }
 
-    fn read32(&self, address: u32) -> Result<u32, BusError> {
+    fn read32(&mut self, address: u32) -> Result<u32, BusError> {
         let address = mask(address);
         require_even(address)?;
         Ok(u32::from_be_bytes([
@@ -88,7 +88,7 @@ impl RamBus {
 }
 
 impl Bus for RamBus {
-    fn read8(&self, address: u32) -> Result<u8, BusError> {
+    fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         let address = mask(address);
         self.ram
             .get(address as usize)
@@ -119,8 +119,10 @@ impl<'a, B, O> ObservedBus<'a, B, O> {
 }
 
 impl<B: Bus, O: BusObserver> Bus for ObservedBus<'_, B, O> {
-    fn read8(&self, address: u32) -> Result<u8, BusError> {
-        self.inner.read8(address)
+    fn read8(&mut self, address: u32) -> Result<u8, BusError> {
+        let value = self.inner.read8(address)?;
+        self.observer.observe(BusEvent { access: BusAccess::Read, address: mask(address), size: 1, value: value as u32 });
+        Ok(value)
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
@@ -129,12 +131,16 @@ impl<B: Bus, O: BusObserver> Bus for ObservedBus<'_, B, O> {
         Ok(())
     }
 
-    fn read16(&self, address: u32) -> Result<u16, BusError> {
-        self.inner.read16(address)
+    fn read16(&mut self, address: u32) -> Result<u16, BusError> {
+        let value = self.inner.read16(address)?;
+        self.observer.observe(BusEvent { access: BusAccess::Read, address: mask(address), size: 2, value: value as u32 });
+        Ok(value)
     }
 
-    fn read32(&self, address: u32) -> Result<u32, BusError> {
-        self.inner.read32(address)
+    fn read32(&mut self, address: u32) -> Result<u32, BusError> {
+        let value = self.inner.read32(address)?;
+        self.observer.observe(BusEvent { access: BusAccess::Read, address: mask(address), size: 4, value });
+        Ok(value)
     }
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
@@ -176,6 +182,19 @@ mod tests {
         }
         assert_eq!(events, vec![BusEvent { access: BusAccess::Write, address: 2, size: 4, value: 0x1234_abcd }]);
         assert_eq!(bus.read32(2).unwrap(), 0x1234_abcd);
+    }
+
+    #[test]
+    fn observed_bus_reports_semantic_reads_once() {
+        let mut bus = RamBus::new(16);
+        bus.write32(2, 0x1234_abcd).unwrap();
+        let mut events = Vec::new();
+        let value = {
+            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event));
+            observed.read32(2).unwrap()
+        };
+        assert_eq!(value, 0x1234_abcd);
+        assert_eq!(events, vec![BusEvent { access: BusAccess::Read, address: 2, size: 4, value: 0x1234_abcd }]);
     }
 
     #[test]
