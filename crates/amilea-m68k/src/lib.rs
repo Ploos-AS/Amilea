@@ -226,7 +226,7 @@ impl Default for Cpu {
 }
 
 impl Cpu {
-    pub fn reset<B: Bus>(&mut self, bus: &B) -> Result<(), CpuError> {
+    pub fn reset<B: Bus>(&mut self, bus: &mut B) -> Result<(), CpuError> {
         self.d = [0; 8];
         self.a = [0; 8];
         self.sr = 0x2700;
@@ -852,7 +852,7 @@ impl Cpu {
         self.sr = value;
     }
 
-    fn indexed_address<B: Bus>(&mut self, bus: &B, base: u32) -> Result<u32, CpuError> {
+    fn indexed_address<B: Bus>(&mut self, bus: &mut B, base: u32) -> Result<u32, CpuError> {
         let extension = self.fetch16(bus)?;
         let index_reg = ((extension >> 12) & 7) as usize;
         let index = if extension & 0x8000 != 0 { self.a[index_reg] } else { self.d[index_reg] };
@@ -861,7 +861,7 @@ impl Cpu {
         Ok(add_displacement(base.wrapping_add(index) & 0x00ff_ffff, displacement))
     }
 
-    fn ea_address<B: Bus>(&mut self, bus: &B, mode: u8, reg: usize) -> Result<u32, CpuError> {
+    fn ea_address<B: Bus>(&mut self, bus: &mut B, mode: u8, reg: usize) -> Result<u32, CpuError> {
         Ok(match mode {
             2 => self.a[reg],
             5 => {
@@ -887,7 +887,7 @@ impl Cpu {
         })
     }
 
-    fn read_ea<B: Bus>(&mut self, bus: &B, size: Size, mode: u8, reg: usize) -> Result<u32, CpuError> {
+    fn read_ea<B: Bus>(&mut self, bus: &mut B, size: Size, mode: u8, reg: usize) -> Result<u32, CpuError> {
         let value = match mode {
             0 => self.d[reg] & size.mask(),
             1 => self.a[reg] & size.mask(),
@@ -1338,7 +1338,7 @@ impl Cpu {
         Ok(if signed { 158 } else { 140 })
     }
 
-    fn exec_mul<B: Bus>(&mut self, bus: &B, opcode: u16) -> Result<u32, CpuError> {
+    fn exec_mul<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
         let signed = opcode & 0x0100 != 0;
         let dn = ((opcode >> 9) & 7) as usize;
         let mode = ((opcode >> 3) & 7) as u8;
@@ -1402,7 +1402,7 @@ impl Cpu {
         Ok(if memory { 18 } else if size == Size::Long { 8 } else { 4 })
     }
 
-    fn exec_cmpm<B: Bus>(&mut self, bus: &B, opcode: u16) -> Result<u32, CpuError> {
+    fn exec_cmpm<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<u32, CpuError> {
         let size = decode_size((opcode >> 6) & 3).ok_or(CpuError::UnimplementedOpcode { opcode })?;
         let dst_reg = ((opcode >> 9) & 7) as usize;
         let src_reg = (opcode & 7) as usize;
@@ -1416,7 +1416,7 @@ impl Cpu {
         Ok(12)
     }
 
-    fn resolve_rmw<B: Bus>(&mut self, bus: &B, size: Size, mode: u8, reg: usize) -> Result<RmwTarget, CpuError> {
+    fn resolve_rmw<B: Bus>(&mut self, bus: &mut B, size: Size, mode: u8, reg: usize) -> Result<RmwTarget, CpuError> {
         Ok(match mode {
             0 => RmwTarget::DataReg(reg),
             2 => RmwTarget::Memory(self.a[reg]),
@@ -1443,7 +1443,7 @@ impl Cpu {
         })
     }
 
-    fn read_rmw<B: Bus>(&self, bus: &B, size: Size, target: RmwTarget) -> Result<u32, CpuError> {
+    fn read_rmw<B: Bus>(&self, bus: &mut B, size: Size, target: RmwTarget) -> Result<u32, CpuError> {
         match target {
             RmwTarget::DataReg(reg) => Ok(self.d[reg] & size.mask()),
             RmwTarget::Memory(address) => self.read_mem(bus, size, address),
@@ -1461,7 +1461,7 @@ impl Cpu {
         }
     }
 
-    fn read_mem<B: Bus>(&self, bus: &B, size: Size, address: u32) -> Result<u32, CpuError> {
+    fn read_mem<B: Bus>(&self, bus: &mut B, size: Size, address: u32) -> Result<u32, CpuError> {
         let result = match size {
             Size::Byte => bus.read8(address).map(|value| value as u32),
             Size::Word => bus.read16(address).map(|value| value as u32),
@@ -1554,13 +1554,13 @@ impl Cpu {
         if value & size.sign() != 0 { self.sr |= CCR_N; }
     }
 
-    fn fetch16<B: Bus>(&mut self, bus: &B) -> Result<u16, CpuError> {
+    fn fetch16<B: Bus>(&mut self, bus: &mut B) -> Result<u16, CpuError> {
         let value = bus.read16(self.pc)?;
         self.pc = (self.pc + 2) & 0x00ff_ffff;
         Ok(value)
     }
 
-    fn fetch32<B: Bus>(&mut self, bus: &B) -> Result<u32, CpuError> {
+    fn fetch32<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
         let value = bus.read32(self.pc)?;
         self.pc = (self.pc + 4) & 0x00ff_ffff;
         Ok(value)
@@ -1572,7 +1572,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn pop16<B: Bus>(&mut self, bus: &B) -> Result<u16, CpuError> {
+    fn pop16<B: Bus>(&mut self, bus: &mut B) -> Result<u16, CpuError> {
         let value = bus.read16(self.a[7])?;
         self.a[7] = self.a[7].wrapping_add(2) & 0x00ff_ffff;
         Ok(value)
@@ -1584,13 +1584,13 @@ impl Cpu {
         Ok(())
     }
 
-    fn pop32<B: Bus>(&mut self, bus: &B) -> Result<u32, CpuError> {
+    fn pop32<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
         let value = bus.read32(self.a[7])?;
         self.a[7] = self.a[7].wrapping_add(4) & 0x00ff_ffff;
         Ok(value)
     }
 
-    fn branch_displacement<B: Bus>(&mut self, bus: &B, opcode: u16) -> Result<i32, CpuError> {
+    fn branch_displacement<B: Bus>(&mut self, bus: &mut B, opcode: u16) -> Result<i32, CpuError> {
         let short = opcode as u8 as i8;
         if short == 0 { Ok(self.fetch16(bus)? as i16 as i32) } else { Ok(short as i32) }
     }
@@ -1631,7 +1631,7 @@ mod tests {
 
     #[test]
     fn movem_long_registers_to_memory_uses_forward_order() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x1122_3344; cpu.d[1] = 0x5566_7788; cpu.a[0] = 0x0200;
         bus.write16(0x100, 0x48d0).unwrap(); bus.write16(0x102, 0x0003).unwrap();
         cpu.step(&mut bus).unwrap();
@@ -1641,7 +1641,7 @@ mod tests {
 
     #[test]
     fn movem_long_predecrement_uses_reversed_mask_order() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x1122_3344; cpu.a[1] = 0x5566_7788; cpu.a[7] = 0x0300;
         bus.write16(0x100, 0x48e7).unwrap(); bus.write16(0x102, 0x4080).unwrap();
         cpu.step(&mut bus).unwrap();
@@ -1664,7 +1664,7 @@ mod tests {
 
     #[test]
     fn observed_divide_by_zero_reports_helper_exception() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         bus.write32(5 * 4, 0x0000_0200).unwrap();
         bus.write16(0x100, 0x80c0).unwrap();
         cpu.d[0] = 0;
@@ -1680,7 +1680,7 @@ mod tests {
 
     #[test]
     fn observed_trap_reports_instruction_then_exception() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         bus.write32(32 * 4, 0x0000_0200).unwrap();
         bus.write16(0x100, 0x4e40).unwrap();
         let mut events = Vec::new();
@@ -1697,7 +1697,7 @@ mod tests {
         bus.write32(3 * 4, 0x0000_0200).unwrap();
         bus.write16(0x100, 0x4cd0).unwrap();
         bus.write16(0x102, 0x0001).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x0201;
         let mut events = Vec::new();
         cpu.step_observed(&mut bus, &mut |event| events.push(event)).unwrap();
@@ -1710,7 +1710,7 @@ mod tests {
 
     #[test]
     fn observed_step_reports_instruction_deterministically() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         bus.write16(0x100, 0x4e71).unwrap();
         let mut events = Vec::new();
         cpu.step_observed(&mut bus, &mut |event| events.push(event)).unwrap();
@@ -1723,7 +1723,7 @@ mod tests {
         bus.write32(3 * 4, 0x0000_0200).unwrap();
         bus.write16(0x100, 0x4cd0).unwrap();
         bus.write16(0x102, 0x0001).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x0201;
         let cycles = cpu.step(&mut bus).unwrap();
         assert_eq!(cycles, 50);
@@ -1741,7 +1741,7 @@ mod tests {
         bus.write32(3 * 4, 0x0000_0200).unwrap();
         bus.write16(0x100, 0x48e0).unwrap();
         bus.write16(0x102, 0x0001).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x0205;
         cpu.a[7] = 0x1122_3344;
         let cycles = cpu.step(&mut bus).unwrap();
@@ -1759,7 +1759,7 @@ mod tests {
         bus.write32(4, 0x0000_0100).unwrap();
         bus.write16(0x100, 0x48e0).unwrap();
         bus.write16(0x102, 0x0003).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x010c;
         cpu.a[7] = 0x1122_3344;
         cpu.a[6] = 0x5566_7788;
@@ -1778,7 +1778,7 @@ mod tests {
         bus.write16(0x100, 0x4cd8).unwrap();
         bus.write16(0x102, 0x0003).unwrap();
         bus.write32(0x104, 0x1122_3344).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x0104;
         let err = cpu.step(&mut bus).unwrap_err();
         assert!(matches!(err, CpuError::DataAccess { read: true, .. }));
@@ -1789,7 +1789,7 @@ mod tests {
 
     #[test]
     fn movem_predecrement_base_register_stores_decremented_value() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[7] = 0x0300;
         bus.write16(0x100, 0x48e7).unwrap();
         bus.write16(0x102, 0x0001).unwrap();
@@ -1800,7 +1800,7 @@ mod tests {
 
     #[test]
     fn movem_postincrement_base_register_finishes_at_end_even_if_loaded() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x0200;
         bus.write32(0x200, 0xdead_beef).unwrap();
         bus.write32(0x204, 0x1122_3344).unwrap();
@@ -1813,7 +1813,7 @@ mod tests {
 
     #[test]
     fn movem_word_postincrement_sign_extends_registers() {
-        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x0200; bus.write16(0x200, 0x8001).unwrap(); bus.write16(0x202, 0x7fff).unwrap();
         bus.write16(0x100, 0x4c98).unwrap(); bus.write16(0x102, 0x0101).unwrap();
         cpu.step(&mut bus).unwrap();
@@ -1989,7 +1989,7 @@ mod tests {
         bus.write16(0x100, 0xb149).unwrap(); // CMPM.W (A1)+,(A0)+
         bus.write16(0x200, 0x1234).unwrap();
         bus.write16(0x300, 0x1234).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[1] = 0x200; cpu.a[0] = 0x300;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.a[1], 0x202);
@@ -2054,7 +2054,7 @@ mod tests {
         for opcode in [0xc141u16, 0xc149, 0xc189] {
             let mut bus = boot_bus();
             bus.write16(0x100, opcode).unwrap();
-            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
             cpu.d[0] = 0x1111_1111; cpu.d[1] = 0x2222_2222;
             cpu.a[0] = 0x3333_3333; cpu.a[1] = 0x4444_4444;
             let sr = cpu.sr;
@@ -2068,7 +2068,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x0188).unwrap(); // MOVEP.W D0,(d16,A0)
         bus.write16(0x102, 0x0010).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x0200; cpu.d[0] = 0x1234;
         assert_eq!(decode_info(0x0188).mnemonic, "MOVEP");
         cpu.step(&mut bus).unwrap();
@@ -2082,7 +2082,7 @@ mod tests {
         bus.write16(0x100, 0x0148).unwrap(); // MOVEP.L (d16,A0),D0
         bus.write16(0x102, 0).unwrap();
         for (offset, value) in [(0,0x12),(2,0x34),(4,0x56),(6,0x78)] { bus.write8(0x200 + offset, value).unwrap(); }
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.a[0] = 0x200;
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap(); cpu.a[0] = 0x200;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0], 0x1234_5678);
     }
@@ -2097,7 +2097,7 @@ mod tests {
 
             let mut bus = boot_bus();
             bus.write16(0x100, opcode).unwrap();
-            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
             cpu.d[0] = 7;
             cpu.d[dn as usize] = 3;
             assert!(cpu.step(&mut bus).is_ok());
@@ -2128,7 +2128,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x003c).unwrap();
         bus.write16(0x102, 0x00ff).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.sr = 0x2720;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.sr & 0x00e0, 0x0020);
@@ -2150,7 +2150,7 @@ mod tests {
             let mut bus = boot_bus();
             bus.write32(4 * 4, 0x240).unwrap();
             bus.write16(0x100, opcode).unwrap();
-            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
             cpu.step(&mut bus).unwrap();
             assert_eq!(cpu.pc, 0x240);
         }
@@ -2221,7 +2221,7 @@ mod tests {
         bus.write16(0x202, 0x4e73).unwrap();
 
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         let sp = cpu.a[7];
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x200);
@@ -2238,7 +2238,7 @@ mod tests {
         bus.write32(4 * 4, 0x240).unwrap();
         bus.write16(0x100, 0x4afc).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         assert_eq!(cpu.step(&mut bus).unwrap(), 34);
         assert_eq!(cpu.pc, 0x240);
         assert_eq!(bus.read32(cpu.a[7] + 2).unwrap(), 0x100);
@@ -2249,7 +2249,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write32(27 * 4, 0x280).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr = 0x2000;
         cpu.stopped = true;
         assert_eq!(cpu.interrupt(&mut bus, 3, 27).unwrap(), 44);
@@ -2263,7 +2263,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write32(3 * 4, 0x2c0).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.pc = 0x101;
         let initial_sp = cpu.a[7];
 
@@ -2281,7 +2281,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write32(2 * 4, 0x2a0).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.pc = 0x8000;
 
         assert_eq!(cpu.step(&mut bus).unwrap(), 50);
@@ -2295,7 +2295,7 @@ mod tests {
         bus.write16(0x100, 0x2080).unwrap(); // MOVE.L D0,(A0)
         bus.write16(0x102, 0x2210).unwrap(); // MOVE.L (A0),D1
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x1234_abcd;
         cpu.a[0] = 0x500;
         cpu.step(&mut bus).unwrap();
@@ -2310,7 +2310,7 @@ mod tests {
         bus.write16(0x100, 0x101f).unwrap(); // MOVE.B (A7)+,D0
         bus.write8(0x3000, 0x80).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0] & 0xff, 0x80);
         assert_eq!(cpu.a[7], 0x3002);
@@ -2325,7 +2325,7 @@ mod tests {
         bus.write16(0x104, 8).unwrap();
         bus.write16(0x504, 0xbeef).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read16(0x508).unwrap(), 0xbeef);
@@ -2340,7 +2340,7 @@ mod tests {
         bus.write16(0x106, 0x327c).unwrap(); // MOVEA.W #$ff00,A1
         bus.write16(0x108, 0xff00).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0], 0x1234_5678);
@@ -2357,7 +2357,7 @@ mod tests {
         bus.write16(0x10e, 0x1234).unwrap();
         bus.write16(0x506, 0xabcd).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.d[1] = 2;
         cpu.step(&mut bus).unwrap();
@@ -2372,7 +2372,7 @@ mod tests {
         bus.write16(0x100, 0x43fa).unwrap(); // LEA d16(PC),A1
         bus.write16(0x102, 0x0010).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.a[1], 0x112);
     }
@@ -2384,7 +2384,7 @@ mod tests {
         bus.write16(0x102, 0x9001).unwrap(); // SUB.B D1,D0
         bus.write16(0x104, 0xb001).unwrap(); // CMP.B D1,D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x7f;
         cpu.d[1] = 1;
         cpu.step(&mut bus).unwrap();
@@ -2404,7 +2404,7 @@ mod tests {
         bus.write16(0x102, 0x4a10).unwrap(); // TST.B (A0)
         bus.write8(0x500, 0x80).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.sr |= CCR_X;
         cpu.step(&mut bus).unwrap();
@@ -2424,7 +2424,7 @@ mod tests {
         bus.write16(0x104, 0x95fc).unwrap(); // SUBA.W #1,A2
         bus.write16(0x106, 1).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[1] = 0x1000;
         cpu.a[2] = 0x1000;
         let sr = cpu.sr;
@@ -2441,7 +2441,7 @@ mod tests {
         bus.write16(0x100, 0xb3fc).unwrap(); // CMPA.W #$ffff,A1
         bus.write16(0x102, 0xffff).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[1] = 0xffff_ffff;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.a[1], 0xffff_ffff);
@@ -2454,7 +2454,7 @@ mod tests {
         bus.write16(0x100, 0x8001).unwrap(); // OR.B D1,D0
         bus.write16(0x102, 0xc001).unwrap(); // AND.B D1,D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0xf0;
         cpu.d[1] = 0x0f;
         cpu.step(&mut bus).unwrap();
@@ -2475,7 +2475,7 @@ mod tests {
         bus.write16(0x108, 0x0c00).unwrap(); // CMPI.B #$7f,D0
         bus.write16(0x10a, 0x7f).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x7f;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0] & 0xff, 0x80);
@@ -2495,7 +2495,7 @@ mod tests {
         bus.write16(0x108, 0xb110).unwrap(); // EOR.B D0,(A0)
         bus.write8(0x500, 0xf0).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.d[0] = 0x0f;
         cpu.step(&mut bus).unwrap();
@@ -2513,7 +2513,7 @@ mod tests {
         bus.write16(0x102, 0x9310).unwrap(); // SUB.B D1,(A0)
         bus.write8(0x500, 10).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.d[0] = 5;
         cpu.d[1] = 3;
@@ -2530,7 +2530,7 @@ mod tests {
         bus.write16(0x102, 0x7001).unwrap(); // MOVEQ #1,D0
         bus.write16(0x104, 0x7002).unwrap(); // MOVEQ #2,D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr |= CCR_Z;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x104);
@@ -2544,7 +2544,7 @@ mod tests {
         bus.write16(0x100, 0x51c8).unwrap(); // DBF D0,-4
         bus.write16(0x102, 0xfffc).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 1;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0] & 0xffff, 0);
@@ -2560,7 +2560,7 @@ mod tests {
         bus.write16(0x100, 0x57c0).unwrap(); // SEQ D0
         bus.write16(0x102, 0x56c1).unwrap(); // SNE D1
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr |= CCR_Z;
         let sr = cpu.sr;
         cpu.step(&mut bus).unwrap();
@@ -2587,7 +2587,7 @@ mod tests {
         bus.write16(0x100, 0x4e90).unwrap(); // JSR (A0)
         bus.write16(0x200, 0x4ed1).unwrap(); // JMP (A1)
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x200;
         cpu.a[1] = 0x300;
         let sp = cpu.a[7];
@@ -2605,7 +2605,7 @@ mod tests {
         bus.write16(0x102, 0xfff0).unwrap();
         bus.write16(0x104, 0x4e5e).unwrap(); // UNLK A6
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[6] = 0x1234;
         let sp = cpu.a[7];
         cpu.step(&mut bus).unwrap();
@@ -2622,7 +2622,7 @@ mod tests {
         bus.write16(0x100, 0x4868).unwrap(); // PEA 8(A0)
         bus.write16(0x102, 8).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         let sp = cpu.a[7];
         cpu.step(&mut bus).unwrap();
@@ -2636,7 +2636,7 @@ mod tests {
         bus.write16(0x102, 0x4881).unwrap(); // EXT.W D1
         bus.write16(0x104, 0x48c1).unwrap(); // EXT.L D1
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr |= CCR_X;
         cpu.d[0] = 0x1234_8000;
         cpu.d[1] = 0x0000_0080;
@@ -2657,7 +2657,7 @@ mod tests {
         bus.write16(0x100, 0x4e40).unwrap(); // TRAP #0
         bus.write16(0x200, 0x4e73).unwrap(); // RTE
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.ssp = 0x3000;
         cpu.usp = 0x2800;
         cpu.a[7] = cpu.usp;
@@ -2680,7 +2680,7 @@ mod tests {
         bus.write16(0x100, 0x4e72).unwrap(); // STOP
         bus.write16(0x102, 0x2700).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.ssp = 0x3000;
         cpu.usp = 0x2800;
         cpu.a[7] = cpu.usp;
@@ -2697,7 +2697,7 @@ mod tests {
         bus.write16(0x100, 0x4e60).unwrap(); // MOVE A0,USP
         bus.write16(0x102, 0x4e69).unwrap(); // MOVE USP,A1
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x1234_5678;
         cpu.step(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
@@ -2713,7 +2713,7 @@ mod tests {
         bus.write16(0x100, 0xa123).unwrap();
         bus.write16(0x102, 0xf123).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x220);
         cpu.a[7] = 0x3000;
@@ -2729,7 +2729,7 @@ mod tests {
         bus.write32(6 * 4, 0x260).unwrap();
         bus.write16(0x100, 0x4e76).unwrap(); // TRAPV
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr |= CCR_V;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x270);
@@ -2749,7 +2749,7 @@ mod tests {
         bus.write32(8 * 4, 0x280).unwrap();
         bus.write16(0x100, 0x4e70).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         assert_eq!(cpu.step(&mut bus).unwrap(), 132);
         assert_eq!(cpu.pc, 0x102);
         cpu.ssp = 0x3000;
@@ -2771,7 +2771,7 @@ mod tests {
         bus.write16(0x108, 0x0a3c).unwrap(); // EORI #$04,CCR
         bus.write16(0x10a, 0x0004).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr = 0x2700;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.sr & 0xff, 0x11);
@@ -2788,7 +2788,7 @@ mod tests {
         bus.write16(0x100, 0x007c).unwrap(); // ORI #$0700,SR
         bus.write16(0x102, 0x0700).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.ssp = 0x3000;
         cpu.usp = 0x2800;
         cpu.a[7] = cpu.usp;
@@ -2803,12 +2803,12 @@ mod tests {
         let mut bus = boot_bus();
         bus.write32(4 * 4, 0x240).unwrap();
         bus.write16(0x100, 0xc0c8).unwrap(); // MULU.W A0,D0: illegal EA
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, 0x240);
 
         bus.write16(0x100, 0x4e74).unwrap(); // RTD: not a 68000 instruction implemented by this core
-        cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         assert!(matches!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e74 })));
     }
 
@@ -2818,7 +2818,7 @@ mod tests {
         let mut bus = boot_bus();
         for opcode in [0xc0c8u16, 0x80c8, 0x4188] {
             bus.write16(0x100, opcode).unwrap();
-            let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+            let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
             cpu.step(&mut bus).unwrap();
             assert_eq!(cpu.pc, bus.read32(4 * 4).unwrap());
         }
@@ -2830,12 +2830,12 @@ mod tests {
         bus.write16(0x100, 0x083a).unwrap(); // BTST #0,(d16,PC)
         bus.write16(0x102, 0).unwrap();
         bus.write16(0x104, 0).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         assert!(cpu.step(&mut bus).is_ok());
 
         bus.write16(0x100, 0x08fa).unwrap(); // BSET #0,(d16,PC): not alterable
         bus.write16(0x102, 0).unwrap();
-        cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc, bus.read32(4 * 4).unwrap());
     }
@@ -2845,7 +2845,7 @@ mod tests {
     fn divs_min_by_minus_one_reports_overflow_without_panicking() {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x81c1).unwrap(); // DIVS.W D1,D0
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x8000_0000;
         cpu.d[1] = 0x0000_ffff;
         cpu.sr = CCR_X;
@@ -2862,7 +2862,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x4400).unwrap(); // NEG.B D0
         bus.write16(0x102, 0x4641).unwrap(); // NOT.W D1
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x1234_0001; cpu.d[1] = 0xabcd_00ff; cpu.sr = CCR_X;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0], 0x1234_00ff); assert_ne!(cpu.sr & (CCR_X | CCR_C | CCR_N), 0);
@@ -2875,7 +2875,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x4000).unwrap(); // NEGX.B D0
         bus.write16(0x102, 0x4001).unwrap(); // NEGX.B D1
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0; cpu.d[1] = 1; cpu.sr = CCR_Z;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0] & 0xff, 0); assert_ne!(cpu.sr & CCR_Z, 0);
@@ -2888,7 +2888,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x4ad8).unwrap(); // TAS (A0)+
         bus.write8(0x500, 0).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.a[0] = 0x500; cpu.sr = CCR_X | CCR_C;
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap(); cpu.a[0] = 0x500; cpu.sr = CCR_X | CCR_C;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read8(0x500).unwrap(), 0x80); assert_eq!(cpu.a[0], 0x501);
         assert_ne!(cpu.sr & CCR_Z, 0); assert_ne!(cpu.sr & CCR_X, 0); assert_eq!(cpu.sr & (CCR_V | CCR_C), 0);
@@ -2900,7 +2900,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x5000).unwrap(); // ADDQ.B #8,D0
         bus.write16(0x102, 0x5300).unwrap(); // SUBQ.B #1,D0
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.d[0] = 0x78;
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap(); cpu.d[0] = 0x78;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0] & 0xff, 0x80); assert_ne!(cpu.sr & CCR_V, 0);
         cpu.step(&mut bus).unwrap();
@@ -2912,7 +2912,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x5248).unwrap(); // ADDQ.W #1,A0
         bus.write16(0x102, 0x5188).unwrap(); // SUBQ.L #8,A0
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0xffff_ffff; cpu.sr = CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C;
         let ccr = cpu.sr & 0x1f;
         cpu.step(&mut bus).unwrap(); assert_eq!(cpu.a[0], 0); assert_eq!(cpu.sr & 0x1f, ccr);
@@ -2924,7 +2924,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x5258).unwrap(); // ADDQ.W #1,(A0)+
         bus.write16(0x500, 0xffff).unwrap();
-        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap(); cpu.a[0] = 0x500;
+        let mut cpu = Cpu::default(); cpu.reset(&mut bus).unwrap(); cpu.a[0] = 0x500;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read16(0x500).unwrap(), 0); assert_eq!(cpu.a[0], 0x502);
         assert_ne!(cpu.sr & CCR_Z, 0); assert_ne!(cpu.sr & (CCR_X | CCR_C), 0);
@@ -2938,7 +2938,7 @@ mod tests {
         bus.write16(0x102, 0xe3d0).unwrap(); // LSL.W (A0)
         bus.write16(0x500, 0x8001).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read16(0x500).unwrap(), 0xc000);
@@ -2955,7 +2955,7 @@ mod tests {
         bus.write16(0x100, 0xe5d8).unwrap(); // ROXL.W (A0)+
         bus.write16(0x500, 0x8000).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.sr = CCR_X;
         cpu.step(&mut bus).unwrap();
@@ -2971,7 +2971,7 @@ mod tests {
         bus.write16(0x100, 0xe6d0).unwrap(); // ROR.W (A0)
         bus.write16(0x500, 0x0001).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.sr = CCR_X;
         cpu.step(&mut bus).unwrap();
@@ -2988,7 +2988,7 @@ mod tests {
         bus.write16(0x102, 0xe309).unwrap(); // LSL.B #1,D1
         bus.write16(0x104, 0xe21a).unwrap(); // ROR.B #1,D2
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x81;
         cpu.d[1] = 0x81;
         cpu.d[2] = 0x01;
@@ -3009,7 +3009,7 @@ mod tests {
         bus.write16(0x100, 0xe310).unwrap(); // ROXL.B #1,D0
         bus.write16(0x102, 0xe210).unwrap(); // ROXR.B #1,D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x80;
         cpu.sr = CCR_X;
         cpu.step(&mut bus).unwrap();
@@ -3025,7 +3025,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0xe130).unwrap(); // ROXL.B D0,D0; count low 6 bits = 0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x40;
         cpu.sr = CCR_X | CCR_V | CCR_C;
         cpu.step(&mut bus).unwrap();
@@ -3042,7 +3042,7 @@ mod tests {
         bus.write16(0x100, 0x0300).unwrap(); // BTST D1,D0
         bus.write16(0x102, 0x0340).unwrap(); // BCHG D1,D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 1 << 3;
         cpu.d[1] = 35;
         cpu.sr = CCR_X | CCR_N | CCR_V | CCR_C | CCR_Z;
@@ -3066,7 +3066,7 @@ mod tests {
         bus.write8(0x500, 0).unwrap();
         bus.write8(0x501, 0x02).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read8(0x500).unwrap(), 0x02);
@@ -3085,7 +3085,7 @@ mod tests {
         bus.write16(0x102, 0).unwrap();
         bus.write8(0x500, 0x5a).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read8(0x500).unwrap(), 0x5a);
@@ -3099,7 +3099,7 @@ mod tests {
         bus.write16(0x100, 0x40c0).unwrap(); // MOVE SR,D0
         bus.write16(0x102, 0x44c1).unwrap(); // MOVE D1,CCR
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr = 0x2715;
         cpu.d[1] = 0x000a;
         cpu.step(&mut bus).unwrap();
@@ -3114,7 +3114,7 @@ mod tests {
         bus.write32(8 * 4, 0x280).unwrap();
         bus.write16(0x100, 0x46c0).unwrap(); // MOVE D0,SR
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.ssp = 0x3000;
         cpu.usp = 0x2800;
         cpu.a[7] = cpu.usp;
@@ -3129,7 +3129,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x4800).unwrap(); // NBCD D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x01;
         cpu.sr = CCR_Z;
         cpu.step(&mut bus).unwrap();
@@ -3143,7 +3143,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x4e77).unwrap(); // RTR
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr = 0x2700;
         let sp = cpu.a[7];
         bus.write16(sp, 0x0015).unwrap();
@@ -3161,7 +3161,7 @@ mod tests {
         bus.write32(4 * 4, 0x240).unwrap();
         bus.write16(0x100, 0x4e74).unwrap(); // RTD: 68010+, not implemented by this 68000 core
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         assert_eq!(cpu.step(&mut bus), Err(CpuError::UnimplementedOpcode { opcode: 0x4e74 }));
         assert_eq!(cpu.pc, 0x102);
     }
@@ -3172,7 +3172,7 @@ mod tests {
         bus.write32(32 * 4, 0x200).unwrap();
         bus.write16(0x100, 0x4e40).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr |= SR_TRACE;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.sr & SR_TRACE, 0);
@@ -3184,7 +3184,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x7001).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr |= CCR_X | CCR_V | CCR_C;
         cpu.step(&mut bus).unwrap();
         assert_ne!(cpu.sr & CCR_X, 0);
@@ -3197,7 +3197,7 @@ mod tests {
         bus.write32(3 * 4, 0x2c0).unwrap();
         bus.write16(0x100, 0x3010).unwrap(); // MOVE.W (A0),D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x501;
         let sp = cpu.a[7];
         assert_eq!(cpu.step(&mut bus).unwrap(), 50);
@@ -3214,7 +3214,7 @@ mod tests {
         bus.write32(3 * 4, 0x2c0).unwrap();
         bus.write16(0x100, 0x3080).unwrap(); // MOVE.W D0,(A0)
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x501;
         cpu.d[0] = 0x1234;
         assert_eq!(cpu.step(&mut bus).unwrap(), 50);
@@ -3229,7 +3229,7 @@ mod tests {
         bus.write32(2 * 4, 0x2a0).unwrap();
         bus.write16(0x100, 0x2010).unwrap(); // MOVE.L (A0),D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x8000;
         assert_eq!(cpu.step(&mut bus).unwrap(), 50);
         assert_eq!(cpu.pc, 0x2a0);
@@ -3242,7 +3242,7 @@ mod tests {
         bus.write16(0x100, 0xd118).unwrap(); // ADD.B D0,(A0)+
         bus.write8(0x500, 10).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.d[0] = 5;
         cpu.step(&mut bus).unwrap();
@@ -3256,7 +3256,7 @@ mod tests {
         bus.write16(0x100, 0x9361).unwrap(); // SUB.W D1,-(A1)
         bus.write16(0x4fe, 10).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[1] = 0x500;
         cpu.d[1] = 3;
         cpu.step(&mut bus).unwrap();
@@ -3271,7 +3271,7 @@ mod tests {
         bus.write16(0x102, 4).unwrap();
         bus.write16(0x504, 10).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.d[0] = 5;
         cpu.step(&mut bus).unwrap();
@@ -3286,7 +3286,7 @@ mod tests {
         bus.write16(0x102, 1).unwrap();
         bus.write8(0x500, 4).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.read8(0x500).unwrap(), 5);
@@ -3300,7 +3300,7 @@ mod tests {
         bus.write16(0x100, 0xd101).unwrap(); // ADDX.B D1,D0
         bus.write16(0x102, 0x9101).unwrap(); // SUBX.B D1,D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0xff;
         cpu.d[1] = 0;
         cpu.sr = CCR_X | CCR_Z;
@@ -3322,7 +3322,7 @@ mod tests {
         bus.write8(0x4ff, 2).unwrap();
         bus.write8(0x5ff, 3).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.a[1] = 0x600;
         cpu.sr = 0;
@@ -3339,7 +3339,7 @@ mod tests {
         bus.write16(0x500, 0x1234).unwrap();
         bus.write16(0x600, 0x1234).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.a[1] = 0x600;
         cpu.sr = CCR_X;
@@ -3358,7 +3358,7 @@ mod tests {
         bus.write16(0x102, 0xc149).unwrap(); // EXG A0,A1
         bus.write16(0x104, 0xc189).unwrap(); // EXG D0,A1
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 1;
         cpu.d[1] = 2;
         cpu.a[0] = 3;
@@ -3383,7 +3383,7 @@ mod tests {
         bus.write16(0x104, 0xc3fc).unwrap(); // MULS.W #-2,D1
         bus.write16(0x106, 0xfffe).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0xffff_0004;
         cpu.d[1] = 0x0000_fffd; // -3
         cpu.sr = CCR_X | CCR_V | CCR_C;
@@ -3403,7 +3403,7 @@ mod tests {
         bus.write16(0x100, 0xc1fc).unwrap(); // MULS.W #-2,D0
         bus.write16(0x102, 0xfffe).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 3;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0], 0xffff_fffa);
@@ -3417,7 +3417,7 @@ mod tests {
         bus.write16(0x100, 0x80fc).unwrap(); // DIVU.W #3,D0
         bus.write16(0x102, 3).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 10;
         cpu.sr = CCR_X | CCR_N | CCR_V | CCR_C;
         cpu.step(&mut bus).unwrap();
@@ -3432,7 +3432,7 @@ mod tests {
         bus.write16(0x100, 0x81fc).unwrap(); // DIVS.W #-3,D0
         bus.write16(0x102, 0xfffd).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = (-10i32) as u32;
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.d[0], (0xffffu32 << 16) | 3);
@@ -3445,7 +3445,7 @@ mod tests {
         bus.write16(0x100, 0x80fc).unwrap(); // DIVU.W #1,D0
         bus.write16(0x102, 1).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x0001_0000;
         let before = cpu.d[0];
         cpu.sr = CCR_X;
@@ -3463,7 +3463,7 @@ mod tests {
         bus.write16(0x100, 0x80fc).unwrap(); // DIVU.W #0,D0
         bus.write16(0x102, 0).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x1234_5678;
         let before = cpu.d[0];
         cpu.step(&mut bus).unwrap();
@@ -3479,7 +3479,7 @@ mod tests {
         bus.write16(0x100, 0xc101).unwrap(); // ABCD D1,D0
         bus.write16(0x102, 0xc101).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x99;
         cpu.d[1] = 0;
         cpu.sr = CCR_X | CCR_Z;
@@ -3498,7 +3498,7 @@ mod tests {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x8101).unwrap(); // SBCD D1,D0
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.d[0] = 0x00;
         cpu.d[1] = 0x01;
         cpu.sr = CCR_Z;
@@ -3515,7 +3515,7 @@ mod tests {
         bus.write8(0x4ff, 0x09).unwrap();
         bus.write8(0x5ff, 0x01).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.a[1] = 0x600;
         cpu.sr = CCR_Z;
@@ -3532,7 +3532,7 @@ mod tests {
         bus.write8(0x4ff, 0x01).unwrap();
         bus.write8(0x6fe, 0x01).unwrap();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.a[0] = 0x500;
         cpu.a[7] = 0x700;
         cpu.sr = CCR_Z;
@@ -3551,7 +3551,7 @@ mod tests {
             let mut bus = boot_bus();
             bus.write16(0x100, opcode).unwrap();
             let mut cpu = Cpu::default();
-            cpu.reset(&bus).unwrap();
+            cpu.reset(&mut bus).unwrap();
             let before = cpu.clone();
             assert_eq!(
                 cpu.step(&mut bus),
@@ -3567,7 +3567,7 @@ mod tests {
     fn masked_interrupt_is_ignored() {
         let mut bus = boot_bus();
         let mut cpu = Cpu::default();
-        cpu.reset(&bus).unwrap();
+        cpu.reset(&mut bus).unwrap();
         cpu.sr = 0x2500;
         assert_eq!(cpu.interrupt(&mut bus, 3, 27).unwrap(), 0);
         assert_eq!(cpu.pc, 0x100);
