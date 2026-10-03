@@ -180,6 +180,8 @@ mod tests {
           assert_eq!(observed.read8(0).unwrap(),0); }
         assert_eq!(events[0].purpose,BusPurpose::Data);
         assert_eq!(events[1].purpose,BusPurpose::Unspecified);
+        assert_eq!(events[0].cycle,9);
+        assert_eq!(events[1].cycle,10);
     }
 
     #[test]
