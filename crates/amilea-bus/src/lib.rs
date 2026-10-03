@@ -28,6 +28,24 @@ pub enum BusSlot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArbitrationPolicy {
+    priority: Vec<BusMaster>,
+}
+
+impl ArbitrationPolicy {
+    pub fn new(priority: Vec<BusMaster>) -> Self { Self { priority } }
+
+    pub fn cpu_first() -> Self { Self::new(vec![BusMaster::Cpu, BusMaster::Blitter]) }
+
+    pub fn blitter_first() -> Self { Self::new(vec![BusMaster::Blitter, BusMaster::Cpu]) }
+
+    pub fn winner(&self, requesters: &[BusMaster]) -> Option<BusMaster> {
+        self.priority.iter().copied().find(|master| requesters.contains(master))
+            .or_else(|| requesters.first().copied())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BusSchedule {
     slots: Vec<BusSlot>,
 }
@@ -56,6 +74,13 @@ impl BusSchedule {
 
     pub fn available_to(&self, master: BusMaster, cycle: u64) -> bool {
         matches!(self.slot(cycle), BusSlot::Free | BusSlot::Reserved(m) if m == master)
+    }
+
+    pub fn grant(&self, cycle: u64, requesters: &[BusMaster], policy: &ArbitrationPolicy) -> Option<BusMaster> {
+        match self.slot(cycle) {
+            BusSlot::Reserved(master) => requesters.contains(&master).then_some(master),
+            BusSlot::Free => policy.winner(requesters),
+        }
     }
 
     pub fn period(&self) -> usize { self.slots.len() }
@@ -340,6 +365,22 @@ mod tests {
         assert!(!schedule.available_to(BusMaster::Cpu,2));
         assert_eq!(schedule.next_cycle_for(BusMaster::Cpu,0),Some(1));
         assert_eq!(schedule.next_cycle_for(BusMaster::Blitter,2),Some(3));
+    }
+
+    #[test]
+    fn arbitration_policy_resolves_free_slot_contention() {
+        let schedule=BusSchedule::free();
+        let requesters=[BusMaster::Cpu,BusMaster::Blitter];
+        assert_eq!(schedule.grant(0,&requesters,&ArbitrationPolicy::cpu_first()),Some(BusMaster::Cpu));
+        assert_eq!(schedule.grant(0,&requesters,&ArbitrationPolicy::blitter_first()),Some(BusMaster::Blitter));
+    }
+
+    #[test]
+    fn reserved_slot_ignores_dynamic_priority() {
+        let schedule=BusSchedule::new(vec![BusMaster::Disk]);
+        let requesters=[BusMaster::Cpu,BusMaster::Blitter,BusMaster::Disk];
+        assert_eq!(schedule.grant(0,&requesters,&ArbitrationPolicy::blitter_first()),Some(BusMaster::Disk));
+        assert_eq!(schedule.grant(0,&[BusMaster::Cpu,BusMaster::Blitter],&ArbitrationPolicy::blitter_first()),None);
     }
 
     #[test]
