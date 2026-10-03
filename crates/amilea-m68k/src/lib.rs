@@ -1623,6 +1623,73 @@ mod tests {
     }
 
     #[test]
+    fn observed_move_address_error_links_bus_fault_to_cpu_exception() {
+        let mut bus = boot_bus();
+        bus.write32(3 * 4, 0x0000_0260).unwrap();
+        bus.write16(0x100, 0x3010).unwrap(); // MOVE.W (A0),D0
+        let mut cpu = Cpu::default();
+        cpu.reset(&mut bus).unwrap();
+        cpu.a[0] = 0x201;
+
+        let mut cpu_events = Vec::new();
+        let mut bus_events = Vec::new();
+        {
+            let mut observed_bus =
+                ObservedBus::new(&mut bus, &mut |event| bus_events.push(event), BusMaster::Cpu, 24);
+            assert_eq!(
+                cpu.step_observed(&mut observed_bus, &mut |event| cpu_events.push(event)),
+                Ok(50)
+            );
+        }
+
+        assert_eq!(
+            &bus_events[..2],
+            &[
+                BusEvent {
+                    cycle: 24,
+                    master: BusMaster::Cpu,
+                    access: BusAccess::Read,
+                    address: 0x100,
+                    size: 2,
+                    value: Some(0x3010),
+                    fault: None,
+                },
+                BusEvent {
+                    cycle: 24,
+                    master: BusMaster::Cpu,
+                    access: BusAccess::Read,
+                    address: 0x201,
+                    size: 2,
+                    value: None,
+                    fault: Some(amilea_bus::BusFault::AddressError),
+                },
+            ]
+        );
+        assert_eq!(
+            cpu_events,
+            vec![
+                CpuEvent::Instruction {
+                    pc: 0x100,
+                    opcode: 0x3010,
+                },
+                CpuEvent::AccessFault {
+                    vector: 3,
+                    pc: 0x100,
+                    opcode: 0x3010,
+                    address: 0x201,
+                    read: true,
+                    instruction_access: false,
+                },
+                CpuEvent::Exception {
+                    vector: 3,
+                    pc: 0x100,
+                },
+            ]
+        );
+        assert_eq!(cpu.pc, 0x260);
+    }
+
+    #[test]
     fn observed_move_links_opcode_fetch_and_operand_read() {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x3010).unwrap(); // MOVE.W (A0),D0
