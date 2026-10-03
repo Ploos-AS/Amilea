@@ -28,7 +28,13 @@ pub enum VideoStandard { Pal, Ntsc }
 pub struct RomReference { pub path: String }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MediaReference { pub path: String }
+pub struct FloppyReference { pub drive: u8, pub path: String }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardDriveKind { Image, Directory }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardDriveReference { pub index: u8, pub kind: HardDriveKind, pub path: String }
 
 fn resolve_config_path(value: &str, config_dir: &Path) -> String {
     let path=if let Some(rest)=value.strip_prefix("$CONFIG/").or_else(|| value.strip_prefix("$CONFIG\\")) {
@@ -50,8 +56,8 @@ pub struct AmileaMachineConfig {
     pub slow_memory_kib: u32,
     pub fast_memory_kib: u32,
     pub rom: Option<RomReference>,
-    pub floppies: Vec<MediaReference>,
-    pub hard_drives: Vec<MediaReference>,
+    pub floppies: Vec<FloppyReference>,
+    pub hard_drives: Vec<HardDriveReference>,
 }
 
 impl Default for AmileaMachineConfig {
@@ -117,8 +123,10 @@ impl FsUaeConfig {
             };
         }
         out.rom=self.kickstart_file.as_ref().map(|path| RomReference { path:resolve_config_path(path,config_dir) });
-        out.floppies=self.floppies.iter().map(|path| MediaReference { path:resolve_config_path(path,config_dir) }).collect();
-        out.hard_drives=self.hard_drives.iter().map(|path| MediaReference { path:resolve_config_path(path,config_dir) }).collect();
+        out.floppies=self.floppies.iter().map(|(drive,path)| FloppyReference { drive:*drive, path:resolve_config_path(path,config_dir) }).collect();
+        out.floppies.sort_by_key(|media| media.drive);
+        out.hard_drives=self.hard_drives.iter().map(|(index,kind,path)| HardDriveReference { index:*index, kind:*kind, path:resolve_config_path(path,config_dir) }).collect();
+        out.hard_drives.sort_by_key(|media| media.index);
         Ok(out)
     }
 }
@@ -135,8 +143,8 @@ pub struct FsUaeConfig {
     pub kickstart_file: Option<String>,
     pub options: BTreeMap<String, String>,
     pub diagnostics: Vec<ImportedOption>,
-    pub floppies: Vec<String>,
-    pub hard_drives: Vec<String>,
+    pub floppies: Vec<(u8, String)>,
+    pub hard_drives: Vec<(u8, HardDriveKind, String)>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -174,8 +182,24 @@ pub fn parse_fs_uae(input: &str) -> Result<FsUaeConfig, ConfigError> {
             "chipset" => { config.chipset=Some(value.clone()); ImportStatus::Supported }
             "video_standard" => { config.video=Some(value.clone()); ImportStatus::Supported }
             "kickstart_file" => { config.kickstart_file=Some(value.clone()); ImportStatus::Supported }
-            key if key.starts_with("floppy_drive_") => { config.floppies.push(value.clone()); ImportStatus::Supported }
-            key if key.starts_with("hard_drive_") => { config.hard_drives.push(value.clone()); ImportStatus::Supported }
+            key if key.starts_with("floppy_drive_") => {
+                match key["floppy_drive_".len()..].parse::<u8>() {
+                    Ok(drive) if drive < 4 => { config.floppies.push((drive,value.clone())); ImportStatus::Supported }
+                    _ => ImportStatus::Unsupported,
+                }
+            }
+            key if key.starts_with("hard_drive_") => {
+                match key["hard_drive_".len()..].parse::<u8>() {
+                    Ok(index) => { config.hard_drives.push((index,HardDriveKind::Image,value.clone())); ImportStatus::Supported }
+                    _ => ImportStatus::Unsupported,
+                }
+            }
+            key if key.starts_with("hard_drive_directory_") => {
+                match key["hard_drive_directory_".len()..].parse::<u8>() {
+                    Ok(index) => { config.hard_drives.push((index,HardDriveKind::Directory,value.clone())); ImportStatus::Supported }
+                    _ => ImportStatus::Unsupported,
+                }
+            }
             "fullscreen" | "window_width" | "window_height" => ImportStatus::Ignored,
             key if key.starts_with("uae_") => ImportStatus::Unsupported,
             _ => ImportStatus::Unknown,
@@ -256,8 +280,8 @@ mod tests {
         let imported=parse_fs_uae("kickstart_file=$CONFIG/roms/kick.rom\nfloppy_drive_0=disks/workbench.adf\nhard_drive_0=$CONFIG/hdd/system.hdf\n").unwrap();
         let machine=imported.normalize_at(Path::new("/configs/a500")).unwrap();
         assert_eq!(machine.rom,Some(RomReference{path:"/configs/a500/roms/kick.rom".into()}));
-        assert_eq!(machine.floppies,vec![MediaReference{path:"/configs/a500/disks/workbench.adf".into()}]);
-        assert_eq!(machine.hard_drives,vec![MediaReference{path:"/configs/a500/hdd/system.hdf".into()}]);
+        assert_eq!(machine.floppies,vec![FloppyReference{drive:0,path:"/configs/a500/disks/workbench.adf".into()}]);
+        assert_eq!(machine.hard_drives,vec![HardDriveReference{index:0,kind:HardDriveKind::Image,path:"/configs/a500/hdd/system.hdf".into()}]);
     }
 
     #[test]
@@ -265,6 +289,14 @@ mod tests {
         let imported=parse_fs_uae("floppy_drive_0=/media/demo.adf\n").unwrap();
         let machine=imported.normalize_at(Path::new("/configs")).unwrap();
         assert_eq!(machine.floppies[0].path,"/media/demo.adf");
+    }
+
+    #[test]
+    fn media_indices_are_preserved_and_sorted() {
+        let imported=parse_fs_uae("floppy_drive_2=d2.adf\nfloppy_drive_0=d0.adf\nhard_drive_3=disk.hdf\nhard_drive_directory_1=Work\n").unwrap();
+        let machine=imported.normalize_at(Path::new("/cfg")).unwrap();
+        assert_eq!(machine.floppies.iter().map(|m|m.drive).collect::<Vec<_>>(),vec![0,2]);
+        assert_eq!(machine.hard_drives.iter().map(|m|(m.index,m.kind)).collect::<Vec<_>>(),vec![(1,HardDriveKind::Directory),(3,HardDriveKind::Image)]);
     }
 
     #[test]
