@@ -260,11 +260,15 @@ impl RasterGeometry {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct BusClock { cycle: Cell<u64> }
+#[derive(Debug, Clone)]
+pub struct BusClock { cycle: Rc<Cell<u64>> }
+
+impl Default for BusClock {
+    fn default()->Self { Self::new(0) }
+}
 
 impl BusClock {
-    pub const fn new(cycle: u64) -> Self { Self { cycle: Cell::new(cycle) } }
+    pub fn new(cycle: u64) -> Self { Self { cycle: Rc::new(Cell::new(cycle)) } }
     pub fn cycle(&self) -> u64 { self.cycle.get() }
     pub fn set(&self, cycle: u64) { self.cycle.set(cycle); }
     pub fn advance(&self, cycles: u64) { self.cycle.set(self.cycle.get().wrapping_add(cycles)); }
