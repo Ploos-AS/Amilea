@@ -16,9 +16,13 @@ pub struct RegisterInfo {
 
 const REGISTERS:&[RegisterInfo]=&[
     RegisterInfo { address:0x00df_f002, device:"OCS", name:"DMACONR", access:RegisterAccess::ReadOnly },
+    RegisterInfo { address:0x00df_f01c, device:"OCS", name:"INTENAR", access:RegisterAccess::ReadOnly },
+    RegisterInfo { address:0x00df_f01e, device:"OCS", name:"INTREQR", access:RegisterAccess::ReadOnly },
     RegisterInfo { address:0x00df_f004, device:"OCS", name:"VPOSR", access:RegisterAccess::ReadOnly },
     RegisterInfo { address:0x00df_f006, device:"OCS", name:"VHPOSR", access:RegisterAccess::ReadOnly },
     RegisterInfo { address:0x00df_f096, device:"OCS", name:"DMACON", access:RegisterAccess::WriteOnly },
+    RegisterInfo { address:0x00df_f09a, device:"OCS", name:"INTENA", access:RegisterAccess::WriteOnly },
+    RegisterInfo { address:0x00df_f09c, device:"OCS", name:"INTREQ", access:RegisterAccess::WriteOnly },
     RegisterInfo { address:0x00bf_e001, device:"CIA-A", name:"PRA", access:RegisterAccess::ReadWrite },
     RegisterInfo { address:0x00bf_e201, device:"CIA-A", name:"DDRA", access:RegisterAccess::ReadWrite },
 ];
@@ -98,6 +102,25 @@ const DMACON_BITS:&[(u16,&str)]=&[
     (0x0001,"DSKSYNC"),
 ];
 
+
+const INTERRUPT_BITS:&[(u16,&str)]=&[
+    (0x4000,"INTEN"),
+    (0x2000,"EXTER"),
+    (0x1000,"DSKSYN"),
+    (0x0800,"RBF"),
+    (0x0400,"AUD3"),
+    (0x0200,"AUD2"),
+    (0x0100,"AUD1"),
+    (0x0080,"AUD0"),
+    (0x0040,"BLIT"),
+    (0x0020,"VERTB"),
+    (0x0010,"COPER"),
+    (0x0008,"PORTS"),
+    (0x0004,"SOFT"),
+    (0x0002,"DSKBLK"),
+    (0x0001,"TBE"),
+];
+
 pub fn decode_register_value(register:&RegisterInfo,value:u32)->DecodedRegisterValue {
     if register.name=="DMACON" || register.name=="DMACONR" {
         let word=value as u16;
@@ -105,6 +128,15 @@ pub fn decode_register_value(register:&RegisterInfo,value:u32)->DecodedRegisterV
             if word & 0x8000 != 0 { SetClearOperation::Set } else { SetClearOperation::Clear }
         );
         let fields=DMACON_BITS.iter()
+            .filter_map(|(mask,name)|(word & mask != 0).then_some(*name))
+            .collect();
+        DecodedRegisterValue { operation, fields }
+    } else if matches!(register.name,"INTENA"|"INTENAR"|"INTREQ"|"INTREQR") {
+        let word=value as u16;
+        let operation=matches!(register.name,"INTENA"|"INTREQ").then_some(
+            if word & 0x8000 != 0 { SetClearOperation::Set } else { SetClearOperation::Clear }
+        );
+        let fields=INTERRUPT_BITS.iter()
             .filter_map(|(mask,name)|(word & mask != 0).then_some(*name))
             .collect();
         DecodedRegisterValue { operation, fields }
@@ -147,6 +179,23 @@ mod tests {
 
 
 
+
+
+    #[test]
+    fn decodes_interrupt_enable_and_request_bits() {
+        let intena=register_info(0x00df_f09a).unwrap();
+        let decoded=decode_register_value(intena,0xc060);
+        assert_eq!(decoded.operation,Some(SetClearOperation::Set));
+        assert_eq!(decoded.fields,vec!["INTEN","BLIT","VERTB"]);
+
+        let intreq=register_info(0x00df_f09c).unwrap();
+        let decoded=decode_register_value(intreq,0x0010);
+        assert_eq!(decoded.operation,Some(SetClearOperation::Clear));
+        assert_eq!(decoded.fields,vec!["COPER"]);
+
+        assert_eq!(register_name(0x00df_f01c),Some("INTENAR"));
+        assert_eq!(register_name(0x00df_f01e),Some("INTREQR"));
+    }
 
     #[test]
     fn decodes_dmacon_set_clear_and_dma_bits() {
