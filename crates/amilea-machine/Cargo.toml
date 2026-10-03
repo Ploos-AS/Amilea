@@ -1,0 +1,12 @@
+[package]
+name = "amilea-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+amilea-bus.workspace = true
+amilea-cia.workspace = true
+amilea-m68k.workspace = true
