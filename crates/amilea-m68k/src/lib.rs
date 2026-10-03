@@ -1623,6 +1623,58 @@ mod tests {
     }
 
     #[test]
+    fn observed_move_links_opcode_fetch_and_operand_read() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x3010).unwrap(); // MOVE.W (A0),D0
+        bus.write16(0x200, 0x1234).unwrap();
+        let mut cpu = Cpu::default();
+        cpu.reset(&mut bus).unwrap();
+        cpu.a[0] = 0x200;
+
+        let mut cpu_events = Vec::new();
+        let mut bus_events = Vec::new();
+        {
+            let mut observed_bus =
+                ObservedBus::new(&mut bus, &mut |event| bus_events.push(event), BusMaster::Cpu, 20);
+            cpu.step_observed(&mut observed_bus, &mut |event| cpu_events.push(event))
+                .unwrap();
+        }
+
+        assert_eq!(
+            cpu_events,
+            vec![CpuEvent::Instruction {
+                pc: 0x100,
+                opcode: 0x3010,
+            }]
+        );
+        assert_eq!(
+            bus_events,
+            vec![
+                BusEvent {
+                    cycle: 20,
+                    master: BusMaster::Cpu,
+                    access: BusAccess::Read,
+                    address: 0x100,
+                    size: 2,
+                    value: Some(0x3010),
+                    fault: None,
+                },
+                BusEvent {
+                    cycle: 20,
+                    master: BusMaster::Cpu,
+                    access: BusAccess::Read,
+                    address: 0x200,
+                    size: 2,
+                    value: Some(0x1234),
+                    fault: None,
+                },
+            ]
+        );
+        assert_eq!(cpu.d[0] & 0xffff, 0x1234);
+        assert_eq!(cpu.pc, 0x102);
+    }
+
+    #[test]
     fn observed_nop_links_cpu_instruction_to_bus_fetch() {
         let mut bus = boot_bus();
         bus.write16(0x100, 0x4e71).unwrap(); // NOP
