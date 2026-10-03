@@ -1643,26 +1643,16 @@ mod tests {
         }
 
         assert_eq!(
-            &bus_events[..2],
-            &[
-                BusEvent {
-                    cycle: 24,
-                    master: BusMaster::Cpu,
-                    access: BusAccess::Read,
-                    address: 0x100,
-                    size: 2,
-                    value: Some(0x3010),
-                    fault: None,
-                },
-                BusEvent {
-                    cycle: 24,
-                    master: BusMaster::Cpu,
-                    access: BusAccess::Read,
-                    address: 0x201,
-                    size: 2,
-                    value: None,
-                    fault: Some(amilea_bus::BusFault::AddressError),
-                },
+            bus_events,
+            vec![
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Read, address: 0x100, size: 2, value: Some(0x3010), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Read, address: 0x201, size: 2, value: None, fault: Some(amilea_bus::BusFault::AddressError) },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ffc, size: 4, value: Some(0x100), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ffa, size: 2, value: Some(0x2700), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ff8, size: 2, value: Some(0x3010), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ff4, size: 4, value: Some(0x201), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ff2, size: 2, value: Some(0x1d), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Read, address: 0x0c, size: 4, value: Some(0x260), fault: None },
             ]
         );
         assert_eq!(
