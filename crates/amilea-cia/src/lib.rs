@@ -1,28 +1,37 @@
 //! Minimal MOS 8520 CIA-A state needed for Amiga boot plumbing.
 //! Timers, TOD, serial and interrupts are intentionally not implemented yet.
 
-use amilea_bus::{Bus, BusError};
+use amilea_bus::{Bus, BusError, BusSignal};
 
 pub const CIA_A_PRA: u32 = 0xbfe001;
 pub const CIA_A_DDRA: u32 = 0xbfe201;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CiaA {
     pra: u8,
     ddra: u8,
+    overlay: Option<BusSignal>,
 }
 
 impl Default for CiaA {
     fn default() -> Self {
-        Self { pra: 0xff, ddra: 0x00 }
+        Self { pra: 0xff, ddra: 0x00, overlay: None }
     }
 }
 
 impl CiaA {
+    pub fn with_overlay_signal(overlay:BusSignal)->Self {
+        let cia=Self { pra:0xff, ddra:0x00, overlay:Some(overlay) };
+        cia.sync_overlay();
+        cia
+    }
+    fn sync_overlay(&self) {
+        if let Some(signal)=&self.overlay { signal.set(self.overlay_enabled()); }
+    }
     pub fn pra(&self) -> u8 { self.pra }
     pub fn ddra(&self) -> u8 { self.ddra }
-    pub fn write_pra(&mut self, value: u8) { self.pra = value; }
-    pub fn write_ddra(&mut self, value: u8) { self.ddra = value; }
+    pub fn write_pra(&mut self, value: u8) { self.pra = value; self.sync_overlay(); }
+    pub fn write_ddra(&mut self, value: u8) { self.ddra = value; self.sync_overlay(); }
 
     /// Logical OVL output used by the machine memory mapper.
     /// Bit 0 only drives OVL when configured as an output.
@@ -53,6 +62,18 @@ impl Bus for CiaA {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cia_a_updates_shared_overlay_signal() {
+        let signal=BusSignal::new(false);
+        let mut cia=CiaA::with_overlay_signal(signal.clone());
+        assert!(signal.get());
+        cia.write_ddra(0x01);
+        cia.write_pra(0x00);
+        assert!(!signal.get());
+        cia.write_pra(0x01);
+        assert!(signal.get());
+    }
 
     #[test]
     fn cia_a_bus_registers_drive_overlay_state() {
