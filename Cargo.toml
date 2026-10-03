@@ -8,6 +8,7 @@ members = [
     "crates/amilea-m68k",
     "crates/amilea-machine",
     "crates/amilea-replay",
+    "crates/amilea-trace",
     "frontends/amilea-cli",
 ]
 resolver = "2"
@@ -29,6 +30,7 @@ amilea-config = { path = "crates/amilea-config" }
 amilea-m68k = { path = "crates/amilea-m68k" }
 amilea-machine = { path = "crates/amilea-machine" }
 amilea-replay = { path = "crates/amilea-replay" }
+amilea-trace = { path = "crates/amilea-trace" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
