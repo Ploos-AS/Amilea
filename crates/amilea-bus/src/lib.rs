@@ -19,7 +19,21 @@ pub enum BusAccess {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusMaster {
+    Cpu,
+    Copper,
+    Blitter,
+    Bitplane,
+    Sprite(u8),
+    Audio(u8),
+    Disk,
+    Refresh,
+    Other(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BusEvent {
+    pub master: BusMaster,
     pub access: BusAccess,
     pub address: u32,
     pub size: u8,
@@ -110,48 +124,49 @@ impl Bus for RamBus {
 pub struct ObservedBus<'a, B, O> {
     inner: &'a mut B,
     observer: &'a mut O,
+    master: BusMaster,
 }
 
 impl<'a, B, O> ObservedBus<'a, B, O> {
-    pub fn new(inner: &'a mut B, observer: &'a mut O) -> Self {
-        Self { inner, observer }
+    pub fn new(inner: &'a mut B, observer: &'a mut O, master: BusMaster) -> Self {
+        Self { inner, observer, master }
     }
 }
 
 impl<B: Bus, O: BusObserver> Bus for ObservedBus<'_, B, O> {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         let value = self.inner.read8(address)?;
-        self.observer.observe(BusEvent { access: BusAccess::Read, address: mask(address), size: 1, value: value as u32 });
+        self.observer.observe(BusEvent { master: self.master, access: BusAccess::Read, address: mask(address), size: 1, value: value as u32 });
         Ok(value)
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         self.inner.write8(address, value)?;
-        self.observer.observe(BusEvent { access: BusAccess::Write, address: mask(address), size: 1, value: value as u32 });
+        self.observer.observe(BusEvent { master: self.master, access: BusAccess::Write, address: mask(address), size: 1, value: value as u32 });
         Ok(())
     }
 
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
         let value = self.inner.read16(address)?;
-        self.observer.observe(BusEvent { access: BusAccess::Read, address: mask(address), size: 2, value: value as u32 });
+        self.observer.observe(BusEvent { master: self.master, access: BusAccess::Read, address: mask(address), size: 2, value: value as u32 });
         Ok(value)
     }
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
         let value = self.inner.read32(address)?;
-        self.observer.observe(BusEvent { access: BusAccess::Read, address: mask(address), size: 4, value });
+        self.observer.observe(BusEvent { master: self.master, access: BusAccess::Read, address: mask(address), size: 4, value });
         Ok(value)
     }
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         self.inner.write16(address, value)?;
-        self.observer.observe(BusEvent { access: BusAccess::Write, address: mask(address), size: 2, value: value as u32 });
+        self.observer.observe(BusEvent { master: self.master, access: BusAccess::Write, address: mask(address), size: 2, value: value as u32 });
         Ok(())
     }
 
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         self.inner.write32(address, value)?;
-        self.observer.observe(BusEvent { access: BusAccess::Write, address: mask(address), size: 4, value });
+        self.observer.observe(BusEvent { master: self.master, access: BusAccess::Write, address: mask(address), size: 4, value });
         Ok(())
     }
 }
@@ -177,11 +192,23 @@ mod tests {
         let mut bus = RamBus::new(16);
         let mut events = Vec::new();
         {
-            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event));
+            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event), BusMaster::Cpu);
             observed.write32(2, 0x1234_abcd).unwrap();
         }
-        assert_eq!(events, vec![BusEvent { access: BusAccess::Write, address: 2, size: 4, value: 0x1234_abcd }]);
+        assert_eq!(events, vec![BusEvent { master: self.master, access: BusAccess::Write, address: 2, size: 4, value: 0x1234_abcd }]);
         assert_eq!(bus.read32(2).unwrap(), 0x1234_abcd);
+    }
+
+    #[test]
+    fn observed_bus_preserves_dma_master_identity() {
+        let mut bus = RamBus::new(16);
+        bus.write16(4, 0xabcd).unwrap();
+        let mut events = Vec::new();
+        {
+            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event), BusMaster::Copper);
+            assert_eq!(observed.read16(4).unwrap(), 0xabcd);
+        }
+        assert_eq!(events, vec![BusEvent { master: BusMaster::Copper, access: BusAccess::Read, address: 4, size: 2, value: 0xabcd }]);
     }
 
     #[test]
@@ -190,11 +217,11 @@ mod tests {
         bus.write32(2, 0x1234_abcd).unwrap();
         let mut events = Vec::new();
         let value = {
-            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event));
+            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event), BusMaster::Cpu);
             observed.read32(2).unwrap()
         };
         assert_eq!(value, 0x1234_abcd);
-        assert_eq!(events, vec![BusEvent { access: BusAccess::Read, address: 2, size: 4, value: 0x1234_abcd }]);
+        assert_eq!(events, vec![BusEvent { master: self.master, access: BusAccess::Read, address: 2, size: 4, value: 0x1234_abcd }]);
     }
 
     #[test]
