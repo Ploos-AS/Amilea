@@ -5,6 +5,7 @@
 
 use amilea_bus::{AddressSpace, BusSignal, OverlayBus, RamBus, Rom};
 use amilea_cia::CiaA;
+use amilea_chipset::{CustomChips, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
 
 pub struct AmigaMachine {
@@ -20,6 +21,7 @@ impl AmigaMachine {
         let mut base=AddressSpace::new();
         base.map(0x000000,0x080000,RamBus::new(0x080000))?;
         base.map(0xbfe000,0x300,CiaA::with_overlay_signal(overlay.clone()))?;
+        base.map(CUSTOM_BASE,CUSTOM_SIZE,CustomChips::default())?;
         base.map(0xf80000,rom.len() as u32,Rom::new(0xf80000,rom.clone()))?;
         let overlay_rom=Rom::new(0,rom);
         Ok(Self {
@@ -37,6 +39,19 @@ impl AmigaMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn cpu_can_access_custom_chip_register_space() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        // MOVE.W #$8200,$00DFF096 -- set DMA master bit in register state.
+        rom[8..16].copy_from_slice(&[0x33,0xfc,0x82,0x00,0x00,0xdf,0xf0,0x96]);
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        machine.step().unwrap();
+    }
 
     #[test]
     fn cpu_program_disables_overlay_through_cia_a() {
