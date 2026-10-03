@@ -9,4 +9,5 @@ repository.workspace = true
 [dependencies]
 amilea-bus.workspace = true
 amilea-cia.workspace = true
+amilea-chipset.workspace = true
 amilea-m68k.workspace = true
