@@ -1,5 +1,10 @@
-use amilea_config::{parse_fs_uae, ImportStatus, VideoStandard as ImportedVideoStandard};
-use amilea_core::{Amilea, MachineConfig, VideoStandard};
+use amilea_config::{
+    parse_fs_uae, Chipset as ImportedChipset, CpuModel as ImportedCpuModel, ImportStatus,
+    VideoStandard as ImportedVideoStandard,
+};
+use amilea_core::{
+    Amilea, Chipset, CpuModel, MachineConfig, VideoStandard,
+};
 use std::path::Path;
 
 fn main() {
@@ -33,13 +38,31 @@ fn runtime_config(path:&Path)->MachineConfig {
     let dir=path.parent().unwrap_or_else(||Path::new("."));
     let machine=imported.normalize_at(dir).unwrap_or_else(|e|panic!("{}: {e}",path.display()));
     MachineConfig {
+        cpu:match machine.cpu {
+            ImportedCpuModel::M68000=>CpuModel::M68000,
+            ImportedCpuModel::M68010=>CpuModel::M68010,
+            ImportedCpuModel::M68020=>CpuModel::M68020,
+            ImportedCpuModel::M68030=>CpuModel::M68030,
+            ImportedCpuModel::M68040=>CpuModel::M68040,
+            ImportedCpuModel::M68060=>CpuModel::M68060,
+        },
+        chipset:match machine.chipset {
+            ImportedChipset::Ocs=>Chipset::Ocs,
+            ImportedChipset::Ecs=>Chipset::Ecs,
+            ImportedChipset::Aga=>Chipset::Aga,
+        },
         video:match machine.video {
             ImportedVideoStandard::Pal=>VideoStandard::Pal,
             ImportedVideoStandard::Ntsc=>VideoStandard::Ntsc,
         },
-        chip_ram_bytes:usize::try_from(u64::from(machine.chip_memory_kib)*1024)
-            .expect("chip memory size does not fit this host"),
+        chip_ram_bytes:kib_to_bytes(machine.chip_memory_kib,"chip"),
+        slow_ram_bytes:kib_to_bytes(machine.slow_memory_kib,"slow"),
+        fast_ram_bytes:kib_to_bytes(machine.fast_memory_kib,"fast"),
     }
+}
+
+fn kib_to_bytes(kib:u32,kind:&str)->usize {
+    usize::try_from(u64::from(kib)*1024).unwrap_or_else(|_|panic!("{kind} memory size does not fit this host"))
 }
 
 fn explain_config(path:&Path) {
