@@ -1,6 +1,7 @@
 //! Deterministic 24-bit Amiga bus primitives.
 
 use std::cell::Cell;
+use std::rc::Rc;
 use thiserror::Error;
 
 pub const ADDRESS_MASK: u32 = 0x00ff_ffff;
@@ -389,19 +390,33 @@ impl Bus for RamBus {
 }
 
 
+#[derive(Debug, Clone)]
+pub struct BusSignal(Rc<Cell<bool>>);
+impl BusSignal {
+    pub fn new(value:bool)->Self { Self(Rc::new(Cell::new(value))) }
+    pub fn get(&self)->bool { self.0.get() }
+    pub fn set(&self,value:bool) { self.0.set(value); }
+}
+
 pub struct OverlayBus<B:Bus,R:Bus> {
     base:B,
     overlay:R,
     overlay_size:u32,
     enabled:bool,
+    signal:Option<BusSignal>,
 }
 
 impl<B:Bus,R:Bus> OverlayBus<B,R> {
     pub fn new(base:B,overlay:R,overlay_size:u32)->Self {
-        Self { base, overlay, overlay_size, enabled:true }
+        Self { base, overlay, overlay_size, enabled:true, signal:None }
     }
-    pub fn overlay_enabled(&self)->bool { self.enabled }
-    pub fn set_overlay(&mut self,enabled:bool) { self.enabled=enabled; }
+    pub fn with_signal(base:B,overlay:R,overlay_size:u32,signal:BusSignal)->Self {
+        Self { base, overlay, overlay_size, enabled:true, signal:Some(signal) }
+    }
+    pub fn overlay_enabled(&self)->bool { self.signal.as_ref().map_or(self.enabled,BusSignal::get) }
+    pub fn set_overlay(&mut self,enabled:bool) {
+        if let Some(signal)=&self.signal { signal.set(enabled); } else { self.enabled=enabled; }
+    }
 }
 
 impl<B:Bus,R:Bus> Bus for OverlayBus<B,R> {
@@ -411,11 +426,11 @@ impl<B:Bus,R:Bus> Bus for OverlayBus<B,R> {
     }
     fn read8(&mut self,address:u32)->Result<u8,BusError> {
         let address=mask(address);
-        if self.enabled && address<self.overlay_size { self.overlay.read8(address) } else { self.base.read8(address) }
+        if self.overlay_enabled() && address<self.overlay_size { self.overlay.read8(address) } else { self.base.read8(address) }
     }
     fn write8(&mut self,address:u32,value:u8)->Result<(),BusError> {
         let address=mask(address);
-        if self.enabled && address<self.overlay_size { self.overlay.write8(address,value) } else { self.base.write8(address,value) }
+        if self.overlay_enabled() && address<self.overlay_size { self.overlay.write8(address,value) } else { self.base.write8(address,value) }
     }
 }
 
