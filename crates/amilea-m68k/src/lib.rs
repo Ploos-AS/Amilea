@@ -3761,4 +3761,36 @@ mod tests {
         assert_eq!(cpu.pc,0x00f8_000a);
     }
 
+    #[test]
+    fn cpu_writes_cia_a_and_disables_rom_overlay() {
+        use amilea_bus::{AddressSpace, BusSignal, OverlayBus, RamBus, Rom};
+        use amilea_cia::{CiaA, CIA_A_DDRA, CIA_A_PRA};
+
+        let signal=BusSignal::new(true);
+        let mut program=vec![0u8;32];
+        // MOVE.B #$01,$00BFE201 ; DDRA bit 0 output
+        program[8..14].copy_from_slice(&[0x13,0xfc,0x00,0x01,0xbf,0xe2]);
+        program[14..16].copy_from_slice(&[0x01,0x00]);
+        // MOVE.B #$00,$00BFE001 ; OVL low
+        program[16..22].copy_from_slice(&[0x13,0xfc,0x00,0x00,0xbf,0xe0]);
+        program[22..24].copy_from_slice(&[0x01,0x00]);
+
+        let mut base=AddressSpace::new();
+        base.map(0x000000,0x080000,RamBus::new(0x080000)).unwrap();
+        base.map(0xbfe000,0x300,CiaA::with_overlay_signal(signal.clone())).unwrap();
+        base.map(0xf80000,program.len() as u32,Rom::new(0xf80000,program)).unwrap();
+
+        let vectors=Rom::new(0,vec![0,0x08,0,0,0,0xf8,0,0x08]);
+        let mut bus=OverlayBus::with_signal(base,vectors,8,signal.clone());
+        let mut cpu=Cpu::default();
+        cpu.reset(&mut bus).unwrap();
+        assert!(signal.get());
+
+        cpu.step(&mut bus).unwrap();
+        assert!(signal.get());
+        cpu.step(&mut bus).unwrap();
+        assert!(!signal.get());
+        assert!(!bus.overlay_enabled());
+    }
+
 }
