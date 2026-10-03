@@ -139,6 +139,43 @@ pub enum BusPurpose { Unspecified, InstructionFetch, Data, Stack, VectorFetch }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusFault { Unmapped, AddressError }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterGeometry {
+    pub lines_per_frame: u16,
+    pub slots_per_line: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterPosition {
+    pub frame: u64,
+    pub line: u16,
+    pub slot: u16,
+}
+
+impl RasterGeometry {
+    pub const PAL_OCS: Self = Self { lines_per_frame: 312, slots_per_line: 227 };
+
+    pub const fn slots_per_frame(self) -> u64 {
+        self.lines_per_frame as u64 * self.slots_per_line as u64
+    }
+
+    pub const fn position(self, cycle: u64) -> RasterPosition {
+        let per_frame=self.slots_per_frame();
+        let within=cycle % per_frame;
+        RasterPosition {
+            frame: cycle / per_frame,
+            line: (within / self.slots_per_line as u64) as u16,
+            slot: (within % self.slots_per_line as u64) as u16,
+        }
+    }
+
+    pub const fn cycle(self, position: RasterPosition) -> u64 {
+        position.frame * self.slots_per_frame()
+            + position.line as u64 * self.slots_per_line as u64
+            + position.slot as u64
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct BusClock { cycle: Cell<u64> }
 
@@ -474,6 +511,24 @@ mod tests {
         assert_eq!(arbiter.grant_next(&schedule,&clock),None);
         assert_eq!(clock.cycle(),10);
         assert!(arbiter.is_pending(BusMaster::Cpu));
+    }
+
+    #[test]
+    fn pal_raster_geometry_maps_global_cycle_deterministically() {
+        let geometry=RasterGeometry::PAL_OCS;
+        assert_eq!(geometry.slots_per_frame(),70_824);
+        assert_eq!(geometry.position(0),RasterPosition{frame:0,line:0,slot:0});
+        assert_eq!(geometry.position(226),RasterPosition{frame:0,line:0,slot:226});
+        assert_eq!(geometry.position(227),RasterPosition{frame:0,line:1,slot:0});
+        assert_eq!(geometry.position(70_823),RasterPosition{frame:0,line:311,slot:226});
+        assert_eq!(geometry.position(70_824),RasterPosition{frame:1,line:0,slot:0});
+    }
+
+    #[test]
+    fn pal_raster_position_round_trips_to_cycle() {
+        let geometry=RasterGeometry::PAL_OCS;
+        let position=RasterPosition{frame:12,line:123,slot:45};
+        assert_eq!(geometry.position(geometry.cycle(position)),position);
     }
 
     #[test]
