@@ -11,3 +11,4 @@ amilea-bus.workspace = true
 amilea-cia.workspace = true
 amilea-chipset.workspace = true
 amilea-m68k.workspace = true
+amilea-trace.workspace = true
