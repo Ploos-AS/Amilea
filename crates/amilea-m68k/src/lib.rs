@@ -171,12 +171,23 @@ fn legal_movem_from_memory(mode: u8, reg: usize) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuEvent {
     Instruction { pc: u32, opcode: u16 },
+    MemoryRead { address: u32, size: u8, value: u32 },
+    MemoryWrite { address: u32, size: u8, value: u32 },
     Exception { vector: u8, pc: u32 },
     AccessFault { vector: u8, pc: u32, opcode: u16, address: u32, read: bool, instruction_access: bool },
 }
 
 pub trait CpuObserver {
     fn observe(&mut self, event: CpuEvent);
+}
+
+impl CpuEvent {
+    pub const fn memory_read(address: u32, size: u8, value: u32) -> Self {
+        Self::MemoryRead { address: address & 0x00ff_ffff, size, value }
+    }
+    pub const fn memory_write(address: u32, size: u8, value: u32) -> Self {
+        Self::MemoryWrite { address: address & 0x00ff_ffff, size, value }
+    }
 }
 
 impl<F: FnMut(CpuEvent)> CpuObserver for F {
@@ -1637,6 +1648,18 @@ mod tests {
         assert_eq!(cpu.a[7], 0x02f8);
         assert_eq!(bus.read32(0x2f8).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x2fc).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn memory_events_are_typed_and_mask_addresses() {
+        assert_eq!(
+            CpuEvent::memory_read(0x0100_0200, 2, 0x1234),
+            CpuEvent::MemoryRead { address: 0x0200, size: 2, value: 0x1234 }
+        );
+        assert_eq!(
+            CpuEvent::memory_write(0x0100_0200, 4, 0xdead_beef),
+            CpuEvent::MemoryWrite { address: 0x0200, size: 4, value: 0xdead_beef }
+        );
     }
 
     #[test]
