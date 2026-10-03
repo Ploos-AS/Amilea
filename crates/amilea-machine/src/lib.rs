@@ -15,6 +15,7 @@ pub struct AmigaMachine {
     bus: OverlayBus<AddressSpace, Rom>,
     overlay: BusSignal,
     clock: BusClock,
+    trace: Vec<BusEvent>,
 }
 
 impl AmigaMachine {
@@ -33,21 +34,26 @@ impl AmigaMachine {
             bus:OverlayBus::with_signal(base,overlay_rom,overlay_size,overlay.clone()),
             overlay,
             clock,
+            trace:Vec::new(),
         })
     }
 
     pub fn reset(&mut self)->Result<(),CpuError> {
-        let mut observer=|_event:BusEvent| {};
+        let trace=&mut self.trace;
+        let mut observer=|event:BusEvent| trace.push(event);
         let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
         self.cpu.reset(&mut bus)
     }
     pub fn step(&mut self)->Result<u32,CpuError> {
-        let mut observer=|_event:BusEvent| {};
+        let trace=&mut self.trace;
+        let mut observer=|event:BusEvent| trace.push(event);
         let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
         self.cpu.step(&mut bus)
     }
     pub fn overlay_enabled(&self)->bool { self.overlay.get() }
     pub fn cycle(&self)->u64 { self.clock.cycle() }
+    pub fn bus_trace(&self)->&[BusEvent] { &self.trace }
+    pub fn clear_bus_trace(&mut self) { self.trace.clear(); }
 }
 
 #[cfg(test)]
@@ -55,6 +61,29 @@ mod tests {
     use super::*;
 
 
+
+
+    #[test]
+    fn machine_retains_ordered_cpu_bus_trace() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..10].copy_from_slice(&0x4e71u16.to_be_bytes());
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        machine.step().unwrap();
+
+        let trace=machine.bus_trace();
+        assert_eq!(trace.len(),3);
+        assert_eq!(trace[0].cycle,0);
+        assert_eq!(trace[1].cycle,1);
+        assert_eq!(trace[2].cycle,2);
+        assert!(trace.iter().all(|event|event.master==BusMaster::Cpu));
+
+        machine.clear_bus_trace();
+        assert!(machine.bus_trace().is_empty());
+        assert_eq!(machine.cycle(),3);
+    }
 
     #[test]
     fn cpu_bus_transactions_advance_machine_clock() {
