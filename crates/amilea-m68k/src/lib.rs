@@ -204,6 +204,8 @@ pub enum CpuError {
     DataAccess { fault: BusError, read: bool },
     #[error("illegal 68000 opcode {opcode:#06x}")]
     IllegalOpcode { opcode: u16 },
+    #[error("68000 execution requested exception vector {vector}")]
+    Exception { vector: u8, pc: u32, cycles: u32 },
 }
 
 impl Default for Cpu {
@@ -747,6 +749,11 @@ impl Cpu {
                 self.enter_access_fault(bus, vector, instruction_pc, opcode, address, read, false)?;
                 Ok(50)
             }
+            Err(CpuError::Exception { vector, pc, cycles }) => {
+                observer.observe(CpuEvent::Exception { vector, pc });
+                self.enter_exception(bus, vector, pc)?;
+                Ok(cycles)
+            }
             Err(CpuError::IllegalOpcode { .. }) => {
                 observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
                     self.enter_exception(bus, 4, instruction_pc)?;
@@ -1282,8 +1289,7 @@ impl Cpu {
         }
         let divisor_raw = self.read_ea(bus, Size::Word, mode, reg)? as u16;
         if divisor_raw == 0 {
-            self.enter_exception(bus, 5, instruction_pc)?;
-            return Ok(38);
+            return Err(CpuError::Exception { vector: 5, pc: instruction_pc, cycles: 38 });
         }
         let dividend = self.d[dn];
         if signed {
@@ -1631,6 +1637,22 @@ mod tests {
         assert_eq!(cpu.a[7], 0x02f8);
         assert_eq!(bus.read32(0x2f8).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x2fc).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn observed_divide_by_zero_reports_helper_exception() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        bus.write32(5 * 4, 0x0000_0200).unwrap();
+        bus.write16(0x100, 0x80c0).unwrap();
+        cpu.d[0] = 0;
+        let mut events = Vec::new();
+        let cycles = cpu.step_observed(&mut bus, &mut |event| events.push(event)).unwrap();
+        assert_eq!(cycles, 38);
+        assert_eq!(events, vec![
+            CpuEvent::Instruction { pc: 0x100, opcode: 0x80c0 },
+            CpuEvent::Exception { vector: 5, pc: 0x100 },
+        ]);
+        assert_eq!(cpu.pc, 0x0200);
     }
 
     #[test]
