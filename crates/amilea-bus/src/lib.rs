@@ -434,6 +434,31 @@ impl<B:Bus,R:Bus> Bus for OverlayBus<B,R> {
     }
 }
 
+
+pub struct WindowBus<B:Bus> {
+    inner:B,
+    start:u32,
+    end:u32,
+}
+
+impl<B:Bus> WindowBus<B> {
+    pub fn new(inner:B,start:u32,end:u32)->Self { Self { inner,start:mask(start),end:mask(end) } }
+}
+
+impl<B:Bus> Bus for WindowBus<B> {
+    fn set_purpose(&mut self,purpose:BusPurpose) { self.inner.set_purpose(purpose); }
+    fn read8(&mut self,address:u32)->Result<u8,BusError> {
+        let address=mask(address);
+        if address<self.start || address>self.end { return Err(BusError::Unmapped{address}); }
+        self.inner.read8(address)
+    }
+    fn write8(&mut self,address:u32,value:u8)->Result<(),BusError> {
+        let address=mask(address);
+        if address<self.start || address>self.end { return Err(BusError::Unmapped{address}); }
+        self.inner.write8(address,value)
+    }
+}
+
 pub struct BusRegion { start:u32, end:u32, bus:Box<dyn Bus> }
 pub struct AddressSpace { regions:Vec<BusRegion> }
 impl AddressSpace {
