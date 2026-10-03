@@ -2,6 +2,7 @@
 members = [
     "crates/amilea-bus",
     "crates/amilea-cia",
+    "crates/amilea-chipset",
     "crates/amilea-core",
     "crates/amilea-config",
     "crates/amilea-m68k",
@@ -22,6 +23,7 @@ repository = "https://github.com/Ploos-AS/Amilea"
 [workspace.dependencies]
 amilea-bus = { path = "crates/amilea-bus" }
 amilea-cia = { path = "crates/amilea-cia" }
+amilea-chipset = { path = "crates/amilea-chipset" }
 amilea-core = { path = "crates/amilea-core" }
 amilea-config = { path = "crates/amilea-config" }
 amilea-m68k = { path = "crates/amilea-m68k" }
