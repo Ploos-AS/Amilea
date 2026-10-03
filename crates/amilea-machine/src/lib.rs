@@ -3,7 +3,9 @@
 //! This layer owns the CPU-visible bus topology and hardware signals.
 //! It is intentionally small while chipset devices are still being added.
 
-use amilea_bus::{AddressSpace, BusSignal, OverlayBus, RamBus, Rom};
+use amilea_bus::{
+    AddressSpace, BusClock, BusEvent, BusMaster, BusSignal, ObservedBus, OverlayBus, RamBus, Rom,
+};
 use amilea_cia::CiaA;
 use amilea_chipset::{CustomChips, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
@@ -12,34 +14,61 @@ pub struct AmigaMachine {
     pub cpu: Cpu,
     bus: OverlayBus<AddressSpace, Rom>,
     overlay: BusSignal,
+    clock: BusClock,
 }
 
 impl AmigaMachine {
     pub fn a500_with_rom(rom: Vec<u8>) -> Result<Self, amilea_bus::BusError> {
         let overlay=BusSignal::new(true);
+        let clock=BusClock::new(0);
         let overlay_size=rom.len().min(0x080000) as u32;
         let mut base=AddressSpace::new();
         base.map(0x000000,0x080000,RamBus::new(0x080000))?;
         base.map(0xbfe000,0x300,CiaA::with_overlay_signal(overlay.clone()))?;
-        base.map(CUSTOM_BASE,CUSTOM_SIZE,CustomChips::default())?;
+        base.map(CUSTOM_BASE,CUSTOM_SIZE,CustomChips::with_clock(clock.clone()))?;
         base.map(0xf80000,rom.len() as u32,Rom::new(0xf80000,rom.clone()))?;
         let overlay_rom=Rom::new(0,rom);
         Ok(Self {
             cpu:Cpu::default(),
             bus:OverlayBus::with_signal(base,overlay_rom,overlay_size,overlay.clone()),
             overlay,
+            clock,
         })
     }
 
-    pub fn reset(&mut self)->Result<(),CpuError> { self.cpu.reset(&mut self.bus) }
-    pub fn step(&mut self)->Result<u32,CpuError> { self.cpu.step(&mut self.bus) }
+    pub fn reset(&mut self)->Result<(),CpuError> {
+        let mut observer=|_event:BusEvent| {};
+        let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
+        self.cpu.reset(&mut bus)
+    }
+    pub fn step(&mut self)->Result<u32,CpuError> {
+        let mut observer=|_event:BusEvent| {};
+        let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
+        self.cpu.step(&mut bus)
+    }
     pub fn overlay_enabled(&self)->bool { self.overlay.get() }
+    pub fn cycle(&self)->u64 { self.clock.cycle() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+
+
+    #[test]
+    fn cpu_bus_transactions_advance_machine_clock() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..10].copy_from_slice(&0x4e71u16.to_be_bytes());
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        assert_eq!(machine.cycle(),0);
+        machine.reset().unwrap();
+        assert_eq!(machine.cycle(),2);
+        machine.step().unwrap();
+        assert_eq!(machine.cycle(),3);
+    }
 
     #[test]
     fn cpu_can_access_custom_chip_register_space() {
