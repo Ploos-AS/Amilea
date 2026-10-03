@@ -1613,13 +1613,53 @@ fn add_displacement(pc: u32, displacement: i32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use amilea_bus::RamBus;
+    use amilea_bus::{BusAccess, BusEvent, BusMaster, ObservedBus, RamBus};
 
     fn boot_bus() -> RamBus {
         let mut bus = RamBus::new(0x4000);
         bus.write32(0, 0x0000_3000).unwrap();
         bus.write32(4, 0x0000_0100).unwrap();
         bus
+    }
+
+    #[test]
+    fn observed_nop_links_cpu_instruction_to_bus_fetch() {
+        let mut bus = boot_bus();
+        bus.write16(0x100, 0x4e71).unwrap(); // NOP
+        let mut cpu = Cpu::default();
+        cpu.reset(&mut bus).unwrap();
+
+        let mut cpu_events = Vec::new();
+        let mut bus_events = Vec::new();
+        {
+            let mut observed_bus =
+                ObservedBus::new(&mut bus, &mut |event| bus_events.push(event), BusMaster::Cpu, 12);
+            assert_eq!(
+                cpu.step_observed(&mut observed_bus, &mut |event| cpu_events.push(event)),
+                Ok(4)
+            );
+        }
+
+        assert_eq!(
+            cpu_events,
+            vec![CpuEvent::Instruction {
+                pc: 0x100,
+                opcode: 0x4e71,
+            }]
+        );
+        assert_eq!(
+            bus_events,
+            vec![BusEvent {
+                cycle: 12,
+                master: BusMaster::Cpu,
+                access: BusAccess::Read,
+                address: 0x100,
+                size: 2,
+                value: Some(0x4e71),
+                fault: None,
+            }]
+        );
+        assert_eq!(cpu.pc, 0x102);
     }
 
     #[test]
