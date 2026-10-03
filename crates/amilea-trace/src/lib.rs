@@ -71,6 +71,49 @@ impl BusQuery {
 }
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetClearOperation { Clear, Set }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedRegisterValue {
+    pub operation:Option<SetClearOperation>,
+    pub fields:Vec<&'static str>,
+}
+
+const DMACON_BITS:&[(u16,&str)]=&[
+    (0x4000,"BBUSY"),
+    (0x2000,"BZERO"),
+    (0x1000,"BLTPRI"),
+    (0x0400,"DMAEN"),
+    (0x0200,"BPLEN"),
+    (0x0100,"COPEN"),
+    (0x0080,"BLTEN"),
+    (0x0040,"SPREN"),
+    (0x0020,"DSKEN"),
+    (0x0010,"AUD3EN"),
+    (0x0008,"AUD2EN"),
+    (0x0004,"AUD1EN"),
+    (0x0002,"AUD0EN"),
+    (0x0001,"DSKSYNC"),
+];
+
+pub fn decode_register_value(register:&RegisterInfo,value:u32)->DecodedRegisterValue {
+    if register.name=="DMACON" || register.name=="DMACONR" {
+        let word=value as u16;
+        let operation=(register.name=="DMACON").then_some(
+            if word & 0x8000 != 0 { SetClearOperation::Set } else { SetClearOperation::Clear }
+        );
+        let fields=DMACON_BITS.iter()
+            .filter_map(|(mask,name)|(word & mask != 0).then_some(*name))
+            .collect();
+        DecodedRegisterValue { operation, fields }
+    } else {
+        DecodedRegisterValue { operation:None, fields:Vec::new() }
+    }
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct ExplainedBusEvent<'a> {
     pub event:&'a BusEvent,
@@ -103,6 +146,19 @@ mod tests {
     }
 
 
+
+
+    #[test]
+    fn decodes_dmacon_set_clear_and_dma_bits() {
+        let register=register_info(0x00df_f096).unwrap();
+        let decoded=decode_register_value(register,0x8700);
+        assert_eq!(decoded.operation,Some(SetClearOperation::Set));
+        assert_eq!(decoded.fields,vec!["DMAEN","BPLEN","COPEN"]);
+
+        let decoded=decode_register_value(register,0x0200);
+        assert_eq!(decoded.operation,Some(SetClearOperation::Clear));
+        assert_eq!(decoded.fields,vec!["BPLEN"]);
+    }
 
     #[test]
     fn explains_register_access_without_changing_raw_event() {
