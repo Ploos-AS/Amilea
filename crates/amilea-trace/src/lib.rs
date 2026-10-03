@@ -70,6 +70,18 @@ impl BusQuery {
     }
 }
 
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExplainedBusEvent<'a> {
+    pub event:&'a BusEvent,
+    pub register:Option<&'static RegisterInfo>,
+}
+
+pub fn explain_event(event:&BusEvent)->ExplainedBusEvent<'_> {
+    ExplainedBusEvent { event, register:register_info(event.address) }
+}
+
+
 pub fn last_write(events:&[BusEvent],address:u32)->Option<&BusEvent> {
     events.iter().rev().find(|event| {
         event.access==BusAccess::Write
@@ -90,6 +102,15 @@ mod tests {
         }
     }
 
+
+
+    #[test]
+    fn explains_register_access_without_changing_raw_event() {
+        let event=event(12,BusAccess::Write,0x00df_f096);
+        let explained=explain_event(&event);
+        assert_eq!(explained.event.cycle,12);
+        assert_eq!(explained.register.unwrap().name,"DMACON");
+    }
 
     #[test]
     fn resolves_known_amiga_registers() {
