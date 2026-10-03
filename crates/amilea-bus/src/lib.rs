@@ -21,6 +21,32 @@ pub enum BusMaster {
     Cpu, Copper, Blitter, Bitplane, Sprite(u8), Audio(u8), Disk, Refresh, Other(u8),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusSchedule {
+    slots: Vec<BusMaster>,
+}
+
+impl BusSchedule {
+    pub fn new(slots: Vec<BusMaster>) -> Self {
+        assert!(!slots.is_empty(), "bus schedule requires at least one slot");
+        Self { slots }
+    }
+
+    pub fn cpu_only() -> Self { Self::new(vec![BusMaster::Cpu]) }
+
+    pub fn owner(&self, cycle: u64) -> BusMaster {
+        self.slots[(cycle % self.slots.len() as u64) as usize]
+    }
+
+    pub fn period(&self) -> usize { self.slots.len() }
+
+    pub fn next_cycle_for(&self, master: BusMaster, from_cycle: u64) -> Option<u64> {
+        (0..self.slots.len() as u64)
+            .map(|offset| from_cycle.wrapping_add(offset))
+            .find(|&cycle| self.owner(cycle) == master)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusPurpose { Unspecified, InstructionFetch, Data, Stack, VectorFetch }
 
@@ -252,6 +278,26 @@ mod tests {
         assert_eq!(events[0].cycle,200); assert_eq!(events[0].master,BusMaster::Cpu);
         assert_eq!(events[1].cycle,201); assert_eq!(events[1].master,BusMaster::Copper);
         assert_eq!(clock.cycle(),202);
+    }
+
+    #[test]
+    fn schedule_assigns_repeating_slot_ownership() {
+        let schedule=BusSchedule::new(vec![BusMaster::Cpu,BusMaster::Copper,BusMaster::Cpu,BusMaster::Blitter]);
+        assert_eq!(schedule.period(),4);
+        assert_eq!(schedule.owner(0),BusMaster::Cpu);
+        assert_eq!(schedule.owner(1),BusMaster::Copper);
+        assert_eq!(schedule.owner(3),BusMaster::Blitter);
+        assert_eq!(schedule.owner(5),BusMaster::Copper);
+        assert_eq!(schedule.next_cycle_for(BusMaster::Blitter,4),Some(7));
+        assert_eq!(schedule.next_cycle_for(BusMaster::Disk,0),None);
+    }
+
+    #[test]
+    fn cpu_only_schedule_is_deterministic() {
+        let schedule=BusSchedule::cpu_only();
+        assert_eq!(schedule.owner(0),BusMaster::Cpu);
+        assert_eq!(schedule.owner(1_000_000),BusMaster::Cpu);
+        assert_eq!(schedule.next_cycle_for(BusMaster::Cpu,123),Some(123));
     }
 
     #[test]
