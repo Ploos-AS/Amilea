@@ -1,6 +1,6 @@
 //! Deterministic Motorola 68000 execution boundary for Amilea M1.
 
-use amilea_bus::{Bus, BusError};
+use amilea_bus::{Bus, BusError, BusPurpose};
 use thiserror::Error;
 
 const CCR_X: u16 = 0x10;
@@ -812,6 +812,7 @@ impl Cpu {
         self.push16(bus, instruction)?;
         self.push32(bus, fault_address)?;
         self.push16(bus, ssw)?;
+        bus.set_purpose(BusPurpose::VectorFetch);
         self.pc = bus.read32((vector as u32) * 4)? & 0x00ff_ffff;
         Ok(())
     }
@@ -825,6 +826,7 @@ impl Cpu {
         self.enter_supervisor();
         self.push32(bus, saved_pc)?;
         self.push16(bus, saved_sr)?;
+        bus.set_purpose(BusPurpose::VectorFetch);
         self.pc = bus.read32((vector as u32) * 4)? & 0x00ff_ffff;
         Ok(())
     }
@@ -1555,36 +1557,42 @@ impl Cpu {
     }
 
     fn fetch16<B: Bus>(&mut self, bus: &mut B) -> Result<u16, CpuError> {
+        bus.set_purpose(BusPurpose::InstructionFetch);
         let value = bus.read16(self.pc)?;
         self.pc = (self.pc + 2) & 0x00ff_ffff;
         Ok(value)
     }
 
     fn fetch32<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
+        bus.set_purpose(BusPurpose::InstructionFetch);
         let value = bus.read32(self.pc)?;
         self.pc = (self.pc + 4) & 0x00ff_ffff;
         Ok(value)
     }
 
     fn push16<B: Bus>(&mut self, bus: &mut B, value: u16) -> Result<(), CpuError> {
+        bus.set_purpose(BusPurpose::Stack);
         self.a[7] = self.a[7].wrapping_sub(2) & 0x00ff_ffff;
         bus.write16(self.a[7], value)?;
         Ok(())
     }
 
     fn pop16<B: Bus>(&mut self, bus: &mut B) -> Result<u16, CpuError> {
+        bus.set_purpose(BusPurpose::Stack);
         let value = bus.read16(self.a[7])?;
         self.a[7] = self.a[7].wrapping_add(2) & 0x00ff_ffff;
         Ok(value)
     }
 
     fn push32<B: Bus>(&mut self, bus: &mut B, value: u32) -> Result<(), CpuError> {
+        bus.set_purpose(BusPurpose::Stack);
         self.a[7] = self.a[7].wrapping_sub(4) & 0x00ff_ffff;
         bus.write32(self.a[7], value)?;
         Ok(())
     }
 
     fn pop32<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
+        bus.set_purpose(BusPurpose::Stack);
         let value = bus.read32(self.a[7])?;
         self.a[7] = self.a[7].wrapping_add(4) & 0x00ff_ffff;
         Ok(value)
