@@ -10,12 +10,23 @@ use amilea_cia::CiaA;
 use amilea_chipset::{CustomChips, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstructionRecord {
+    pub pc:u32,
+    pub opcode:u16,
+    pub cycle_start:u64,
+    pub cycle_end:u64,
+    pub bus_event_start:usize,
+    pub bus_event_end:usize,
+}
+
 pub struct AmigaMachine {
     pub cpu: Cpu,
     bus: OverlayBus<AddressSpace, Rom>,
     overlay: BusSignal,
     clock: BusClock,
     trace: Vec<BusEvent>,
+    instructions: Vec<InstructionRecord>,
 }
 
 impl AmigaMachine {
@@ -35,6 +46,7 @@ impl AmigaMachine {
             overlay,
             clock,
             trace:Vec::new(),
+            instructions:Vec::new(),
         })
     }
 
@@ -45,15 +57,41 @@ impl AmigaMachine {
         self.cpu.reset(&mut bus)
     }
     pub fn step(&mut self)->Result<u32,CpuError> {
+        let pc=self.cpu.pc;
+        let cycle_start=self.clock.cycle();
+        let bus_event_start=self.trace.len();
         let trace=&mut self.trace;
         let mut observer=|event:BusEvent| trace.push(event);
         let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
-        self.cpu.step(&mut bus)
+        let result=self.cpu.step(&mut bus);
+        let bus_event_end=self.trace.len();
+        if let Some(fetch)=self.trace.get(bus_event_start) {
+            if fetch.address==pc && fetch.size==2 {
+                if let Some(value)=fetch.value {
+                    self.instructions.push(InstructionRecord {
+                        pc,
+                        opcode:value as u16,
+                        cycle_start,
+                        cycle_end:self.clock.cycle(),
+                        bus_event_start,
+                        bus_event_end,
+                    });
+                }
+            }
+        }
+        result
     }
     pub fn overlay_enabled(&self)->bool { self.overlay.get() }
     pub fn cycle(&self)->u64 { self.clock.cycle() }
     pub fn bus_trace(&self)->&[BusEvent] { &self.trace }
-    pub fn clear_bus_trace(&mut self) { self.trace.clear(); }
+    pub fn clear_bus_trace(&mut self) {
+        self.trace.clear();
+        self.instructions.clear();
+    }
+    pub fn instruction_trace(&self)->&[InstructionRecord] { &self.instructions }
+    pub fn instruction_for_bus_event(&self,index:usize)->Option<&InstructionRecord> {
+        self.instructions.iter().rev().find(|record|index>=record.bus_event_start && index<record.bus_event_end)
+    }
     pub fn raster_position(&self,cycle:u64)->RasterPosition { RasterGeometry::PAL_OCS.position(cycle) }
 }
 
@@ -64,6 +102,27 @@ mod tests {
 
 
 
+
+
+    #[test]
+    fn instruction_record_links_pc_opcode_cycles_and_bus_events() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..10].copy_from_slice(&0x4e71u16.to_be_bytes());
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        machine.step().unwrap();
+
+        let record=machine.instruction_trace().last().unwrap();
+        assert_eq!(record.pc,0x00f8_0008);
+        assert_eq!(record.opcode,0x4e71);
+        assert_eq!(record.cycle_start,2);
+        assert_eq!(record.cycle_end,3);
+        assert_eq!(record.bus_event_start,2);
+        assert_eq!(record.bus_event_end,3);
+        assert_eq!(machine.instruction_for_bus_event(2),Some(record));
+    }
 
     #[test]
     fn trace_cycles_map_to_pal_raster_positions() {
