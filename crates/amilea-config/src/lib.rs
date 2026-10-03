@@ -50,6 +50,12 @@ impl Default for AmileaMachineConfig {
 pub enum NormalizeError {
     #[error("unsupported Amiga model {model}")]
     UnsupportedModel { model: String },
+    #[error("unsupported CPU {cpu}")]
+    UnsupportedCpu { cpu: String },
+    #[error("unsupported chipset {chipset}")]
+    UnsupportedChipset { chipset: String },
+    #[error("unsupported video standard {video}")]
+    UnsupportedVideo { video: String },
 }
 
 impl FsUaeConfig {
@@ -68,6 +74,28 @@ impl FsUaeConfig {
             _ => return Err(NormalizeError::UnsupportedModel { model }),
         };
         if let Some(kib)=self.chip_memory_kib { out.chip_memory_kib=kib; }
+        if let Some(kib)=self.slow_memory_kib { out.slow_memory_kib=kib; }
+        if let Some(kib)=self.fast_memory_kib { out.fast_memory_kib=kib; }
+        if let Some(cpu)=self.cpu.as_deref() {
+            out.cpu=match cpu.to_ascii_lowercase().as_str() {
+                "68000" => CpuModel::M68000, "68010" => CpuModel::M68010,
+                "68020" => CpuModel::M68020, "68030" => CpuModel::M68030,
+                "68040" => CpuModel::M68040, "68060" => CpuModel::M68060,
+                _ => return Err(NormalizeError::UnsupportedCpu { cpu:cpu.into() }),
+            };
+        }
+        if let Some(chipset)=self.chipset.as_deref() {
+            out.chipset=match chipset.to_ascii_lowercase().as_str() {
+                "ocs" => Chipset::Ocs, "ecs" => Chipset::Ecs, "aga" => Chipset::Aga,
+                _ => return Err(NormalizeError::UnsupportedChipset { chipset:chipset.into() }),
+            };
+        }
+        if let Some(video)=self.video.as_deref() {
+            out.video=match video.to_ascii_lowercase().as_str() {
+                "pal" => VideoStandard::Pal, "ntsc" => VideoStandard::Ntsc,
+                _ => return Err(NormalizeError::UnsupportedVideo { video:video.into() }),
+            };
+        }
         out.rom=self.kickstart_file.as_ref().map(|path| RomReference { path:path.clone() });
         Ok(out)
     }
@@ -77,6 +105,11 @@ impl FsUaeConfig {
 pub struct FsUaeConfig {
     pub amiga_model: Option<String>,
     pub chip_memory_kib: Option<u32>,
+    pub slow_memory_kib: Option<u32>,
+    pub fast_memory_kib: Option<u32>,
+    pub cpu: Option<String>,
+    pub chipset: Option<String>,
+    pub video: Option<String>,
     pub kickstart_file: Option<String>,
     pub options: BTreeMap<String, String>,
     pub diagnostics: Vec<ImportedOption>,
@@ -105,6 +138,17 @@ pub fn parse_fs_uae(input: &str) -> Result<FsUaeConfig, ConfigError> {
                 config.chip_memory_kib=Some(value.parse().map_err(|_| ConfigError::InvalidInteger { line, key:key.clone() })?);
                 ImportStatus::Supported
             }
+            "slow_memory" => {
+                config.slow_memory_kib=Some(value.parse().map_err(|_| ConfigError::InvalidInteger { line, key:key.clone() })?);
+                ImportStatus::Supported
+            }
+            "fast_memory" => {
+                config.fast_memory_kib=Some(value.parse().map_err(|_| ConfigError::InvalidInteger { line, key:key.clone() })?);
+                ImportStatus::Supported
+            }
+            "cpu" => { config.cpu=Some(value.clone()); ImportStatus::Supported }
+            "chipset" => { config.chipset=Some(value.clone()); ImportStatus::Supported }
+            "video_standard" => { config.video=Some(value.clone()); ImportStatus::Supported }
             "kickstart_file" => { config.kickstart_file=Some(value.clone()); ImportStatus::Supported }
             "fullscreen" | "window_width" | "window_height" => ImportStatus::Ignored,
             key if key.starts_with("uae_") => ImportStatus::Unsupported,
@@ -161,6 +205,24 @@ mod tests {
     fn normalization_rejects_unknown_machine_model_explicitly() {
         let imported=parse_fs_uae("amiga_model=A9999").unwrap();
         assert_eq!(imported.normalize(),Err(NormalizeError::UnsupportedModel{model:"A9999".into()}));
+    }
+
+    #[test]
+    fn hardware_overrides_normalize_to_typed_machine_fields() {
+        let imported=parse_fs_uae("amiga_model=A500\nslow_memory=512\nfast_memory=8192\ncpu=68020\nchipset=ECS\nvideo_standard=NTSC\n").unwrap();
+        let machine=imported.normalize().unwrap();
+        assert_eq!(machine.slow_memory_kib,512);
+        assert_eq!(machine.fast_memory_kib,8192);
+        assert_eq!(machine.cpu,CpuModel::M68020);
+        assert_eq!(machine.chipset,Chipset::Ecs);
+        assert_eq!(machine.video,VideoStandard::Ntsc);
+    }
+
+    #[test]
+    fn invalid_hardware_overrides_fail_normalization() {
+        assert_eq!(parse_fs_uae("cpu=68080").unwrap().normalize(),Err(NormalizeError::UnsupportedCpu{cpu:"68080".into()}));
+        assert_eq!(parse_fs_uae("chipset=AAA").unwrap().normalize(),Err(NormalizeError::UnsupportedChipset{chipset:"AAA".into()}));
+        assert_eq!(parse_fs_uae("video_standard=SECAM").unwrap().normalize(),Err(NormalizeError::UnsupportedVideo{video:"SECAM".into()}));
     }
 
     #[test]
