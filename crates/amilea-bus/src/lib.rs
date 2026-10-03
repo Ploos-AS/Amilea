@@ -480,6 +480,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn address_space_routes_ram_and_rom() {
+        let mut space=AddressSpace::new();
+        space.map(0x000000,0x1000,RamBus::new(0x1000)).unwrap();
+        space.map(0xf80000,4,Rom::new(0xf80000,vec![0xde,0xad,0xbe,0xef])).unwrap();
+        space.write16(0x20,0x1234).unwrap();
+        assert_eq!(space.read16(0x20).unwrap(),0x1234);
+        assert_eq!(space.read32(0xf80000).unwrap(),0xdead_beef);
+        assert_eq!(space.write8(0xf80000,0),Err(BusError::Unmapped{address:0xf80000}));
+        assert_eq!(space.read8(0x1000),Err(BusError::Unmapped{address:0x1000}));
+    }
+
+    #[test]
+    fn address_space_rejects_overlapping_regions() {
+        let mut space=AddressSpace::new();
+        space.map(0x1000,0x100,RamBus::new(0x100)).unwrap();
+        assert_eq!(space.map(0x1080,0x100,RamBus::new(0x100)),Err(BusError::Unmapped{address:0x1080}));
+    }
+
+    #[test]
     fn rom_is_read_only_and_mapped_at_explicit_base() {
         let mut rom=Rom::new(0xf80000,vec![0x11,0x22,0x33,0x44]);
         assert_eq!(rom.base(),0xf80000);
