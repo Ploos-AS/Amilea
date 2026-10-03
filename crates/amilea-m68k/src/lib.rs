@@ -3734,4 +3734,34 @@ mod tests {
         assert_eq!(cpu.interrupt(&mut bus, 3, 27).unwrap(), 0);
         assert_eq!(cpu.pc, 0x100);
     }
+    #[test]
+    fn reset_vectors_can_be_fetched_from_synthetic_rom_address_space() {
+        use amilea_bus::{AddressSpace, RamBus, Rom};
+
+        let mut image=vec![0u8;16];
+        image[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        image[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        image[8..10].copy_from_slice(&0x4e71u16.to_be_bytes());
+
+        let mut space=AddressSpace::new();
+        space.map(0x000000,0x080000,RamBus::new(0x080000)).unwrap();
+        space.map(0xf80000,image.len() as u32,Rom::new(0xf80000,image)).unwrap();
+
+        // Model the reset-vector overlay explicitly: the synthetic ROM vectors
+        // are presented at address zero for reset, then normal mapping resumes.
+        let mut reset=AddressSpace::new();
+        let mut vectors=vec![0u8;8];
+        vectors[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        vectors[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        reset.map(0,8,Rom::new(0,vectors)).unwrap();
+
+        let mut cpu=Cpu::default();
+        cpu.reset(&mut reset).unwrap();
+        assert_eq!(cpu.ssp,0x0008_0000);
+        assert_eq!(cpu.a[7],0x0008_0000);
+        assert_eq!(cpu.pc,0x00f8_0008);
+        assert_eq!(cpu.step(&mut space).unwrap(),4);
+        assert_eq!(cpu.pc,0x00f8_000a);
+    }
+
 }
