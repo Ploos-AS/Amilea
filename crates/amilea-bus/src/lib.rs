@@ -21,21 +21,41 @@ pub enum BusMaster {
     Cpu, Copper, Blitter, Bitplane, Sprite(u8), Audio(u8), Disk, Refresh, Other(u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusSlot {
+    Free,
+    Reserved(BusMaster),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BusSchedule {
-    slots: Vec<BusMaster>,
+    slots: Vec<BusSlot>,
 }
 
 impl BusSchedule {
     pub fn new(slots: Vec<BusMaster>) -> Self {
+        Self::from_slots(slots.into_iter().map(BusSlot::Reserved).collect())
+    }
+
+    pub fn from_slots(slots: Vec<BusSlot>) -> Self {
         assert!(!slots.is_empty(), "bus schedule requires at least one slot");
         Self { slots }
     }
 
     pub fn cpu_only() -> Self { Self::new(vec![BusMaster::Cpu]) }
 
-    pub fn owner(&self, cycle: u64) -> BusMaster {
+    pub fn free() -> Self { Self::from_slots(vec![BusSlot::Free]) }
+
+    pub fn slot(&self, cycle: u64) -> BusSlot {
         self.slots[(cycle % self.slots.len() as u64) as usize]
+    }
+
+    pub fn owner(&self, cycle: u64) -> Option<BusMaster> {
+        match self.slot(cycle) { BusSlot::Free => None, BusSlot::Reserved(master) => Some(master) }
+    }
+
+    pub fn available_to(&self, master: BusMaster, cycle: u64) -> bool {
+        matches!(self.slot(cycle), BusSlot::Free | BusSlot::Reserved(m) if m == master)
     }
 
     pub fn period(&self) -> usize { self.slots.len() }
@@ -43,7 +63,7 @@ impl BusSchedule {
     pub fn next_cycle_for(&self, master: BusMaster, from_cycle: u64) -> Option<u64> {
         (0..self.slots.len() as u64)
             .map(|offset| from_cycle.wrapping_add(offset))
-            .find(|&cycle| self.owner(cycle) == master)
+            .find(|&cycle| self.available_to(master, cycle))
     }
 }
 
@@ -290,10 +310,10 @@ mod tests {
     fn schedule_assigns_repeating_slot_ownership() {
         let schedule=BusSchedule::new(vec![BusMaster::Cpu,BusMaster::Copper,BusMaster::Cpu,BusMaster::Blitter]);
         assert_eq!(schedule.period(),4);
-        assert_eq!(schedule.owner(0),BusMaster::Cpu);
-        assert_eq!(schedule.owner(1),BusMaster::Copper);
-        assert_eq!(schedule.owner(3),BusMaster::Blitter);
-        assert_eq!(schedule.owner(5),BusMaster::Copper);
+        assert_eq!(schedule.owner(0),Some(BusMaster::Cpu));
+        assert_eq!(schedule.owner(1),Some(BusMaster::Copper));
+        assert_eq!(schedule.owner(3),Some(BusMaster::Blitter));
+        assert_eq!(schedule.owner(5),Some(BusMaster::Copper));
         assert_eq!(schedule.next_cycle_for(BusMaster::Blitter,4),Some(7));
         assert_eq!(schedule.next_cycle_for(BusMaster::Disk,0),None);
     }
@@ -301,9 +321,25 @@ mod tests {
     #[test]
     fn cpu_only_schedule_is_deterministic() {
         let schedule=BusSchedule::cpu_only();
-        assert_eq!(schedule.owner(0),BusMaster::Cpu);
-        assert_eq!(schedule.owner(1_000_000),BusMaster::Cpu);
+        assert_eq!(schedule.owner(0),Some(BusMaster::Cpu));
+        assert_eq!(schedule.owner(1_000_000),Some(BusMaster::Cpu));
         assert_eq!(schedule.next_cycle_for(BusMaster::Cpu,123),Some(123));
+    }
+
+    #[test]
+    fn free_slots_are_available_to_dynamic_masters() {
+        let schedule=BusSchedule::from_slots(vec![
+            BusSlot::Reserved(BusMaster::Copper),
+            BusSlot::Free,
+            BusSlot::Reserved(BusMaster::Disk),
+            BusSlot::Free,
+        ]);
+        assert_eq!(schedule.owner(1),None);
+        assert!(schedule.available_to(BusMaster::Cpu,1));
+        assert!(schedule.available_to(BusMaster::Blitter,1));
+        assert!(!schedule.available_to(BusMaster::Cpu,2));
+        assert_eq!(schedule.next_cycle_for(BusMaster::Cpu,0),Some(1));
+        assert_eq!(schedule.next_cycle_for(BusMaster::Blitter,2),Some(3));
     }
 
     #[test]
