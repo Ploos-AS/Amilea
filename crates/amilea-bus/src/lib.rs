@@ -152,6 +152,12 @@ pub struct RasterPosition {
     pub slot: u16,
 }
 
+impl std::fmt::Display for RasterPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "F{} L{} S{}", self.frame, self.line, self.slot)
+    }
+}
+
 impl RasterGeometry {
     pub const PAL_OCS: Self = Self { lines_per_frame: 312, slots_per_line: 227 };
 
@@ -229,6 +235,12 @@ pub struct BusEvent {
     pub size: u8,
     pub value: Option<u32>,
     pub fault: Option<BusFault>,
+}
+
+impl BusEvent {
+    pub const fn raster_position(&self, geometry: RasterGeometry) -> RasterPosition {
+        geometry.position(self.cycle)
+    }
 }
 
 pub trait BusObserver { fn observe(&mut self, event: BusEvent); }
@@ -529,6 +541,23 @@ mod tests {
         let geometry=RasterGeometry::PAL_OCS;
         let position=RasterPosition{frame:12,line:123,slot:45};
         assert_eq!(geometry.position(geometry.cycle(position)),position);
+    }
+
+    #[test]
+    fn bus_event_derives_pal_raster_position_without_storing_it() {
+        let event=BusEvent {
+            cycle: 70_824 + 227 * 12 + 34,
+            master:BusMaster::Copper,
+            purpose:BusPurpose::Data,
+            access:BusAccess::Read,
+            address:0xdff080,
+            size:2,
+            value:Some(0x1234),
+            fault:None,
+        };
+        let position=event.raster_position(RasterGeometry::PAL_OCS);
+        assert_eq!(position,RasterPosition{frame:1,line:12,slot:34});
+        assert_eq!(position.to_string(),"F1 L12 S34");
     }
 
     #[test]
