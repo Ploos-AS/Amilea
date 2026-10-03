@@ -388,6 +388,30 @@ impl Bus for RamBus {
     }
 }
 
+pub struct BusRegion { start:u32, end:u32, bus:Box<dyn Bus> }
+pub struct AddressSpace { regions:Vec<BusRegion> }
+impl AddressSpace {
+    pub fn new()->Self { Self{regions:Vec::new()} }
+    pub fn map<B:Bus+'static>(&mut self,start:u32,size:u32,bus:B)->Result<(),BusError> {
+        let start=mask(start);
+        if size==0{return Err(BusError::Unmapped{address:start});}
+        let end=start.checked_add(size-1).filter(|end|*end<=ADDRESS_MASK).ok_or(BusError::Unmapped{address:start})?;
+        if self.regions.iter().any(|r|start<=r.end&&end>=r.start){return Err(BusError::Unmapped{address:start});}
+        self.regions.push(BusRegion{start,end,bus:Box::new(bus)});
+        self.regions.sort_by_key(|r|r.start);
+        Ok(())
+    }
+    fn region_mut(&mut self,address:u32)->Result<&mut BusRegion,BusError>{
+        let address=mask(address);
+        self.regions.iter_mut().find(|r|address>=r.start&&address<=r.end).ok_or(BusError::Unmapped{address})
+    }
+}
+impl Default for AddressSpace{fn default()->Self{Self::new()}}
+impl Bus for AddressSpace{
+    fn read8(&mut self,address:u32)->Result<u8,BusError>{let address=mask(address);self.region_mut(address)?.bus.read8(address)}
+    fn write8(&mut self,address:u32,value:u8)->Result<(),BusError>{let address=mask(address);self.region_mut(address)?.bus.write8(address,value)}
+}
+
 pub struct ObservedBus<'a,B,O> {
     inner:&'a mut B, observer:&'a mut O, master:BusMaster, clock:BusClock, shared_clock:Option<&'a BusClock>, schedule:Option<&'a BusSchedule>, timing:BusTiming, purpose:BusPurpose,
 }
