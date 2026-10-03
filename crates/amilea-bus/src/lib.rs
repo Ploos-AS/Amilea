@@ -46,6 +46,34 @@ impl ArbitrationPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusArbiter {
+    pending: Vec<BusMaster>,
+    policy: ArbitrationPolicy,
+}
+
+impl BusArbiter {
+    pub fn new(policy: ArbitrationPolicy) -> Self { Self { pending: Vec::new(), policy } }
+
+    pub fn request(&mut self, master: BusMaster) {
+        if !self.pending.contains(&master) { self.pending.push(master); }
+    }
+
+    pub fn cancel(&mut self, master: BusMaster) {
+        self.pending.retain(|pending| *pending != master);
+    }
+
+    pub fn is_pending(&self, master: BusMaster) -> bool { self.pending.contains(&master) }
+
+    pub fn grant(&mut self, schedule: &BusSchedule, cycle: u64) -> Option<BusMaster> {
+        let winner=schedule.grant(cycle,&self.pending,&self.policy)?;
+        self.cancel(winner);
+        Some(winner)
+    }
+
+    pub fn pending(&self) -> &[BusMaster] { &self.pending }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BusSchedule {
     slots: Vec<BusSlot>,
 }
@@ -381,6 +409,31 @@ mod tests {
         let requesters=[BusMaster::Cpu,BusMaster::Blitter,BusMaster::Disk];
         assert_eq!(schedule.grant(0,&requesters,&ArbitrationPolicy::blitter_first()),Some(BusMaster::Disk));
         assert_eq!(schedule.grant(0,&[BusMaster::Cpu,BusMaster::Blitter],&ArbitrationPolicy::blitter_first()),None);
+    }
+
+    #[test]
+    fn arbiter_keeps_losers_pending_until_later_slot() {
+        let schedule=BusSchedule::free();
+        let mut arbiter=BusArbiter::new(ArbitrationPolicy::blitter_first());
+        arbiter.request(BusMaster::Cpu);
+        arbiter.request(BusMaster::Blitter);
+        arbiter.request(BusMaster::Cpu);
+        assert_eq!(arbiter.pending().len(),2);
+        assert_eq!(arbiter.grant(&schedule,0),Some(BusMaster::Blitter));
+        assert!(arbiter.is_pending(BusMaster::Cpu));
+        assert!(!arbiter.is_pending(BusMaster::Blitter));
+        assert_eq!(arbiter.grant(&schedule,1),Some(BusMaster::Cpu));
+        assert!(arbiter.pending().is_empty());
+    }
+
+    #[test]
+    fn arbiter_waits_through_reserved_slot_for_other_master() {
+        let schedule=BusSchedule::from_slots(vec![BusSlot::Reserved(BusMaster::Disk),BusSlot::Free]);
+        let mut arbiter=BusArbiter::new(ArbitrationPolicy::cpu_first());
+        arbiter.request(BusMaster::Cpu);
+        assert_eq!(arbiter.grant(&schedule,0),None);
+        assert!(arbiter.is_pending(BusMaster::Cpu));
+        assert_eq!(arbiter.grant(&schedule,1),Some(BusMaster::Cpu));
     }
 
     #[test]
