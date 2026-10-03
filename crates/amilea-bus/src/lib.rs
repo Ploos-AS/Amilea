@@ -388,6 +388,37 @@ impl Bus for RamBus {
     }
 }
 
+
+pub struct OverlayBus<B:Bus,R:Bus> {
+    base:B,
+    overlay:R,
+    overlay_size:u32,
+    enabled:bool,
+}
+
+impl<B:Bus,R:Bus> OverlayBus<B,R> {
+    pub fn new(base:B,overlay:R,overlay_size:u32)->Self {
+        Self { base, overlay, overlay_size, enabled:true }
+    }
+    pub fn overlay_enabled(&self)->bool { self.enabled }
+    pub fn set_overlay(&mut self,enabled:bool) { self.enabled=enabled; }
+}
+
+impl<B:Bus,R:Bus> Bus for OverlayBus<B,R> {
+    fn set_purpose(&mut self,purpose:BusPurpose) {
+        self.base.set_purpose(purpose);
+        self.overlay.set_purpose(purpose);
+    }
+    fn read8(&mut self,address:u32)->Result<u8,BusError> {
+        let address=mask(address);
+        if self.enabled && address<self.overlay_size { self.overlay.read8(address) } else { self.base.read8(address) }
+    }
+    fn write8(&mut self,address:u32,value:u8)->Result<(),BusError> {
+        let address=mask(address);
+        if self.enabled && address<self.overlay_size { self.overlay.write8(address,value) } else { self.base.write8(address,value) }
+    }
+}
+
 pub struct BusRegion { start:u32, end:u32, bus:Box<dyn Bus> }
 pub struct AddressSpace { regions:Vec<BusRegion> }
 impl AddressSpace {
@@ -478,6 +509,21 @@ fn require_even(address:u32)->Result<(),BusError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_switches_low_memory_between_rom_and_ram() {
+        let mut ram=RamBus::new(16);
+        ram.write32(0,0x1122_3344).unwrap();
+        let rom=Rom::new(0,vec![0xaa,0xbb,0xcc,0xdd,0,0,0,0]);
+        let mut bus=OverlayBus::new(ram,rom,8);
+        assert!(bus.overlay_enabled());
+        assert_eq!(bus.read32(0).unwrap(),0xaabb_ccdd);
+        assert_eq!(bus.write8(0,0xff),Err(BusError::Unmapped{address:0}));
+        bus.set_overlay(false);
+        assert_eq!(bus.read32(0).unwrap(),0x1122_3344);
+        bus.write8(0,0x55).unwrap();
+        assert_eq!(bus.read8(0).unwrap(),0x55);
+    }
 
     #[test]
     fn address_space_routes_ram_and_rom() {
