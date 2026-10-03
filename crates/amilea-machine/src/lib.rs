@@ -16,6 +16,7 @@ pub struct AmigaMachine {
 impl AmigaMachine {
     pub fn a500_with_rom(rom: Vec<u8>) -> Result<Self, amilea_bus::BusError> {
         let overlay=BusSignal::new(true);
+        let overlay_size=rom.len().min(0x080000) as u32;
         let mut base=AddressSpace::new();
         base.map(0x000000,0x080000,RamBus::new(0x080000))?;
         base.map(0xbfe000,0x300,CiaA::with_overlay_signal(overlay.clone()))?;
@@ -23,7 +24,7 @@ impl AmigaMachine {
         let overlay_rom=Rom::new(0,rom);
         Ok(Self {
             cpu:Cpu::default(),
-            bus:OverlayBus::with_signal(base,overlay_rom,0x080000,overlay.clone()),
+            bus:OverlayBus::with_signal(base,overlay_rom,overlay_size,overlay.clone()),
             overlay,
         })
     }
@@ -36,6 +37,27 @@ impl AmigaMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_program_disables_overlay_through_cia_a() {
+        let mut rom=vec![0u8;0x40];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+
+        // MOVE.B #$01,$00BFE201 -- make CIA-A PA0 an output.
+        rom[8..16].copy_from_slice(&[0x13,0xfc,0x00,0x01,0x00,0xbf,0xe2,0x01]);
+        // MOVE.B #$00,$00BFE001 -- drive OVL low.
+        rom[16..24].copy_from_slice(&[0x13,0xfc,0x00,0x00,0x00,0xbf,0xe0,0x01]);
+
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        assert!(machine.overlay_enabled());
+
+        machine.step().unwrap();
+        assert!(machine.overlay_enabled());
+        machine.step().unwrap();
+        assert!(!machine.overlay_enabled());
+    }
 
     #[test]
     fn machine_resets_from_rom_overlay() {
