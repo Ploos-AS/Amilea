@@ -1656,13 +1656,13 @@ mod tests {
             bus_events,
             vec![
                 BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::InstructionFetch, access: BusAccess::Read, address: 0x100, size: 2, value: Some(0x3010), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Data, access: BusAccess::Read, address: 0x201, size: 2, value: None, fault: Some(amilea_bus::BusFault::AddressError) },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ffc, size: 4, value: Some(0x100), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ffa, size: 2, value: Some(0x2700), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff8, size: 2, value: Some(0x3010), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff4, size: 4, value: Some(0x201), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff2, size: 2, value: Some(0x1d), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::VectorFetch, access: BusAccess::Read, address: 0x0c, size: 4, value: Some(0x260), fault: None },
+                BusEvent { cycle: 25, master: BusMaster::Cpu, purpose: BusPurpose::Data, access: BusAccess::Read, address: 0x201, size: 2, value: None, fault: Some(amilea_bus::BusFault::AddressError) },
+                BusEvent { cycle: 26, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ffc, size: 4, value: Some(0x100), fault: None },
+                BusEvent { cycle: 27, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ffa, size: 2, value: Some(0x2700), fault: None },
+                BusEvent { cycle: 28, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff8, size: 2, value: Some(0x3010), fault: None },
+                BusEvent { cycle: 29, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff4, size: 4, value: Some(0x201), fault: None },
+                BusEvent { cycle: 30, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff2, size: 2, value: Some(0x1d), fault: None },
+                BusEvent { cycle: 31, master: BusMaster::Cpu, purpose: BusPurpose::VectorFetch, access: BusAccess::Read, address: 0x0c, size: 4, value: Some(0x260), fault: None },
             ]
         );
         assert_eq!(
@@ -1728,7 +1728,7 @@ mod tests {
                     fault: None,
                 },
                 BusEvent {
-                    cycle: 20,
+                    cycle: 21,
                     master: BusMaster::Cpu,
                     purpose: BusPurpose::Data,
                     access: BusAccess::Read,
