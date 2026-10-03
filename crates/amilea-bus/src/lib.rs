@@ -350,6 +350,32 @@ pub trait Bus {
     }
 }
 
+
+#[derive(Debug, Clone)]
+pub struct Rom {
+    base: u32,
+    bytes: Vec<u8>,
+}
+
+impl Rom {
+    pub fn new(base:u32,bytes:Vec<u8>)->Self { Self { base:mask(base), bytes } }
+    pub fn base(&self)->u32 { self.base }
+    pub fn len(&self)->usize { self.bytes.len() }
+    pub fn is_empty(&self)->bool { self.bytes.is_empty() }
+}
+
+impl Bus for Rom {
+    fn read8(&mut self,address:u32)->Result<u8,BusError> {
+        let address=mask(address);
+        let offset=address.wrapping_sub(self.base) as usize;
+        self.bytes.get(offset).copied().ok_or(BusError::Unmapped{address})
+    }
+
+    fn write8(&mut self,address:u32,_value:u8)->Result<(),BusError> {
+        Err(BusError::Unmapped{address:mask(address)})
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RamBus { ram: Vec<u8> }
 impl RamBus { pub fn new(size: usize) -> Self { Self { ram: vec![0; size] } } }
@@ -428,6 +454,18 @@ fn require_even(address:u32)->Result<(),BusError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rom_is_read_only_and_mapped_at_explicit_base() {
+        let mut rom=Rom::new(0xf80000,vec![0x11,0x22,0x33,0x44]);
+        assert_eq!(rom.base(),0xf80000);
+        assert_eq!(rom.len(),4);
+        assert_eq!(rom.read16(0xf80000).unwrap(),0x1122);
+        assert_eq!(rom.read16(0xf80002).unwrap(),0x3344);
+        assert_eq!(rom.read8(0xf7ffff),Err(BusError::Unmapped{address:0xf7ffff}));
+        assert_eq!(rom.write8(0xf80000,0xaa),Err(BusError::Unmapped{address:0xf80000}));
+        assert_eq!(rom.read8(0xf80000).unwrap(),0x11);
+    }
 
     #[test]
     fn bus_is_big_endian() {
