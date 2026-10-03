@@ -1590,6 +1590,41 @@ mod tests {
     }
 
     #[test]
+    fn movem_odd_address_routes_to_vector_three() {
+        let mut bus = boot_bus();
+        bus.write32(3 * 4, 0x0000_0200).unwrap();
+        bus.write16(0x100, 0x4cd0).unwrap();
+        bus.write16(0x102, 0x0001).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x0201;
+        let cycles = cpu.step(&mut bus).unwrap();
+        assert_eq!(cycles, 50);
+        assert_eq!(cpu.pc, 0x0200);
+        assert_eq!(cpu.a[0], 0x0201);
+        assert_eq!(cpu.a[7], 0x2ff2);
+        assert_eq!(bus.read32(0x2ff8).unwrap(), 0x0000_0201);
+        assert_eq!(bus.read16(0x2ffc).unwrap(), 0x4cd0);
+        assert_eq!(bus.read32(0x2ffe).unwrap(), 0x0000_0100);
+    }
+
+    #[test]
+    fn movem_predecrement_odd_address_routes_to_vector_three_after_decrement() {
+        let mut bus = boot_bus();
+        bus.write32(3 * 4, 0x0000_0200).unwrap();
+        bus.write16(0x100, 0x48e0).unwrap();
+        bus.write16(0x102, 0x0001).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x0205;
+        cpu.a[7] = 0x1122_3344;
+        let cycles = cpu.step(&mut bus).unwrap();
+        assert_eq!(cycles, 50);
+        assert_eq!(cpu.pc, 0x0200);
+        assert_eq!(cpu.a[0], 0x0201);
+        assert_eq!(bus.read32(0x2ff8).unwrap(), 0x0000_0201);
+        assert_eq!(bus.read16(0x2ffc).unwrap(), 0x48e0);
+    }
+
+    #[test]
     fn movem_predecrement_fault_preserves_completed_transfer_and_progress() {
         let mut bus = RamBus::new(0x108);
         bus.write32(0, 0x0000_0108).unwrap();
