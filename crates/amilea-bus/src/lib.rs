@@ -104,6 +104,49 @@ impl BusArbiter {
     }
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ScheduleBuildError {
+    #[error("slot {slot} is outside scanline")]
+    OutOfRange { slot: u16 },
+    #[error("slot {slot} is already reserved")]
+    Overlap { slot: u16 },
+    #[error("invalid slot range {start}..={end}")]
+    InvalidRange { start: u16, end: u16 },
+}
+
+pub struct PalOcsScheduleBuilder {
+    slots: Vec<BusSlot>,
+}
+
+impl PalOcsScheduleBuilder {
+    pub fn new() -> Self {
+        Self { slots: vec![BusSlot::Free; RasterGeometry::PAL_OCS.slots_per_line as usize] }
+    }
+
+    pub fn reserve(&mut self, slot: u16, master: BusMaster) -> Result<&mut Self, ScheduleBuildError> {
+        let entry=self.slots.get_mut(slot as usize).ok_or(ScheduleBuildError::OutOfRange { slot })?;
+        if !matches!(entry, BusSlot::Free) { return Err(ScheduleBuildError::Overlap { slot }); }
+        *entry=BusSlot::Reserved(master);
+        Ok(self)
+    }
+
+    pub fn reserve_range(&mut self, start: u16, end: u16, master: BusMaster) -> Result<&mut Self, ScheduleBuildError> {
+        if start > end { return Err(ScheduleBuildError::InvalidRange { start, end }); }
+        for slot in start..=end {
+            if slot as usize >= self.slots.len() { return Err(ScheduleBuildError::OutOfRange { slot }); }
+            if !matches!(self.slots[slot as usize], BusSlot::Free) { return Err(ScheduleBuildError::Overlap { slot }); }
+        }
+        for slot in start..=end { self.slots[slot as usize]=BusSlot::Reserved(master); }
+        Ok(self)
+    }
+
+    pub fn build(self) -> BusSchedule { BusSchedule::from_slots(self.slots) }
+}
+
+impl Default for PalOcsScheduleBuilder {
+    fn default() -> Self { Self::new() }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BusSchedule {
     slots: Vec<BusSlot>,
@@ -611,6 +654,35 @@ mod tests {
         assert_eq!(schedule.classified_slot(4).class,SlotClass::Copper);
         assert_eq!(schedule.classified_slot(5).class,SlotClass::Dynamic);
         assert_eq!(schedule.owner(5),None);
+    }
+
+    #[test]
+    fn pal_ocs_builder_starts_with_one_dynamic_scanline() {
+        let schedule=PalOcsScheduleBuilder::new().build();
+        assert_eq!(schedule.period(),227);
+        assert_eq!(schedule.owner(0),None);
+        assert_eq!(schedule.owner(226),None);
+        assert_eq!(schedule.classified_slot(100).class,SlotClass::Dynamic);
+    }
+
+    #[test]
+    fn pal_ocs_builder_reserves_ranges_and_rejects_overlap() {
+        let mut builder=PalOcsScheduleBuilder::new();
+        builder.reserve(3,BusMaster::Refresh).unwrap();
+        builder.reserve_range(10,13,BusMaster::Disk).unwrap();
+        assert_eq!(builder.reserve(12,BusMaster::Copper),Err(ScheduleBuildError::Overlap{slot:12}));
+        let schedule=builder.build();
+        assert_eq!(schedule.owner(3),Some(BusMaster::Refresh));
+        assert_eq!(schedule.classified_slot(11).class,SlotClass::Disk);
+        assert_eq!(schedule.owner(14),None);
+    }
+
+    #[test]
+    fn pal_ocs_builder_rejects_invalid_or_out_of_range_reservations() {
+        let mut builder=PalOcsScheduleBuilder::new();
+        assert_eq!(builder.reserve(227,BusMaster::Cpu),Err(ScheduleBuildError::OutOfRange{slot:227}));
+        assert_eq!(builder.reserve_range(20,19,BusMaster::Disk),Err(ScheduleBuildError::InvalidRange{start:20,end:19}));
+        assert_eq!(builder.reserve_range(225,227,BusMaster::Disk),Err(ScheduleBuildError::OutOfRange{slot:227}));
     }
 
     #[test]
