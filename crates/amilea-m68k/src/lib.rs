@@ -1623,7 +1623,7 @@ fn add_displacement(pc: u32, displacement: i32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use amilea_bus::{BusAccess, BusEvent, BusMaster, ObservedBus, RamBus};
+    use amilea_bus::{BusAccess, BusEvent, BusMaster, BusPurpose, ObservedBus, RamBus};
 
     fn boot_bus() -> RamBus {
         let mut bus = RamBus::new(0x4000);
@@ -1655,14 +1655,14 @@ mod tests {
         assert_eq!(
             bus_events,
             vec![
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Read, address: 0x100, size: 2, value: Some(0x3010), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Read, address: 0x201, size: 2, value: None, fault: Some(amilea_bus::BusFault::AddressError) },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ffc, size: 4, value: Some(0x100), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ffa, size: 2, value: Some(0x2700), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ff8, size: 2, value: Some(0x3010), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ff4, size: 4, value: Some(0x201), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Write, address: 0x2ff2, size: 2, value: Some(0x1d), fault: None },
-                BusEvent { cycle: 24, master: BusMaster::Cpu, access: BusAccess::Read, address: 0x0c, size: 4, value: Some(0x260), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::InstructionFetch, access: BusAccess::Read, address: 0x100, size: 2, value: Some(0x3010), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Data, access: BusAccess::Read, address: 0x201, size: 2, value: None, fault: Some(amilea_bus::BusFault::AddressError) },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ffc, size: 4, value: Some(0x100), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ffa, size: 2, value: Some(0x2700), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff8, size: 2, value: Some(0x3010), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff4, size: 4, value: Some(0x201), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::Stack, access: BusAccess::Write, address: 0x2ff2, size: 2, value: Some(0x1d), fault: None },
+                BusEvent { cycle: 24, master: BusMaster::Cpu, purpose: BusPurpose::VectorFetch, access: BusAccess::Read, address: 0x0c, size: 4, value: Some(0x260), fault: None },
             ]
         );
         assert_eq!(
@@ -1720,6 +1720,7 @@ mod tests {
                 BusEvent {
                     cycle: 20,
                     master: BusMaster::Cpu,
+                    purpose: BusPurpose::InstructionFetch,
                     access: BusAccess::Read,
                     address: 0x100,
                     size: 2,
@@ -1729,6 +1730,7 @@ mod tests {
                 BusEvent {
                     cycle: 20,
                     master: BusMaster::Cpu,
+                    purpose: BusPurpose::Data,
                     access: BusAccess::Read,
                     address: 0x200,
                     size: 2,
@@ -1771,6 +1773,7 @@ mod tests {
             vec![BusEvent {
                 cycle: 12,
                 master: BusMaster::Cpu,
+                purpose: BusPurpose::InstructionFetch,
                 access: BusAccess::Read,
                 address: 0x100,
                 size: 2,
