@@ -90,13 +90,15 @@ impl Bus for RamBus {
 }
 
 pub struct ObservedBus<'a,B,O> {
-    inner:&'a mut B, observer:&'a mut O, master:BusMaster, cycle:u64, purpose:BusPurpose,
+    inner:&'a mut B, observer:&'a mut O, master:BusMaster, cycle:u64, cycle_step:u64, purpose:BusPurpose,
 }
 impl<'a,B,O> ObservedBus<'a,B,O> {
     pub fn new(inner:&'a mut B, observer:&'a mut O, master:BusMaster, cycle:u64)->Self {
-        Self { inner, observer, master, cycle, purpose:BusPurpose::Unspecified }
+        Self { inner, observer, master, cycle, cycle_step: 1, purpose:BusPurpose::Unspecified }
     }
     pub fn set_cycle(&mut self, cycle:u64) { self.cycle=cycle; }
+    pub fn set_cycle_step(&mut self, cycle_step:u64) { self.cycle_step=cycle_step; }
+    fn advance_cycle(&mut self) { self.cycle = self.cycle.wrapping_add(self.cycle_step); }
     fn take_purpose(&mut self)->BusPurpose { std::mem::replace(&mut self.purpose, BusPurpose::Unspecified) }
 }
 impl<B:Bus,O:BusObserver> Bus for ObservedBus<'_,B,O> {
@@ -105,32 +107,32 @@ impl<B:Bus,O:BusObserver> Bus for ObservedBus<'_,B,O> {
     fn read8(&mut self,address:u32)->Result<u8,BusError>{
         let purpose=self.take_purpose(); let result=self.inner.read8(address);
         let (value,fault)=match &result { Ok(v)=>(Some(*v as u32),None), Err(e)=>(None,Some(e.into())) };
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:1,value,fault}); result
+        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:1,value,fault}); self.advance_cycle(); result
     }
     fn read16(&mut self,address:u32)->Result<u16,BusError>{
         let purpose=self.take_purpose(); let result=self.inner.read16(address);
         let (value,fault)=match &result { Ok(v)=>(Some(*v as u32),None), Err(e)=>(None,Some(e.into())) };
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:2,value,fault}); result
+        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:2,value,fault}); self.advance_cycle(); result
     }
     fn read32(&mut self,address:u32)->Result<u32,BusError>{
         let purpose=self.take_purpose(); let result=self.inner.read32(address);
         let (value,fault)=match &result { Ok(v)=>(Some(*v),None), Err(e)=>(None,Some(e.into())) };
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:4,value,fault}); result
+        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:4,value,fault}); self.advance_cycle(); result
     }
     fn write8(&mut self,address:u32,value:u8)->Result<(),BusError>{
         let purpose=self.take_purpose(); let result=self.inner.write8(address,value);
         let fault=result.as_ref().err().map(Into::into);
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:1,value:Some(value as u32),fault}); result
+        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:1,value:Some(value as u32),fault}); self.advance_cycle(); result
     }
     fn write16(&mut self,address:u32,value:u16)->Result<(),BusError>{
         let purpose=self.take_purpose(); let result=self.inner.write16(address,value);
         let fault=result.as_ref().err().map(Into::into);
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:2,value:Some(value as u32),fault}); result
+        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:2,value:Some(value as u32),fault}); self.advance_cycle(); result
     }
     fn write32(&mut self,address:u32,value:u32)->Result<(),BusError>{
         let purpose=self.take_purpose(); let result=self.inner.write32(address,value);
         let fault=result.as_ref().err().map(Into::into);
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:4,value:Some(value),fault}); result
+        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:4,value:Some(value),fault}); self.advance_cycle(); result
     }
 }
 
@@ -178,6 +180,17 @@ mod tests {
           assert_eq!(observed.read8(0).unwrap(),0); }
         assert_eq!(events[0].purpose,BusPurpose::Data);
         assert_eq!(events[1].purpose,BusPurpose::Unspecified);
+    }
+
+    #[test]
+    fn observed_bus_advances_cycle_per_semantic_transaction() {
+        let mut bus=RamBus::new(16); bus.write16(4,0xabcd).unwrap(); let mut events=Vec::new();
+        { let mut observed=ObservedBus::new(&mut bus,&mut |e| events.push(e),BusMaster::Cpu,100);
+          observed.set_cycle_step(4);
+          observed.set_purpose(BusPurpose::InstructionFetch); assert_eq!(observed.read16(4).unwrap(),0xabcd);
+          observed.set_purpose(BusPurpose::Data); observed.write16(6,0x1234).unwrap(); }
+        assert_eq!(events[0].cycle,100); assert_eq!(events[1].cycle,104);
+        assert_eq!(events[0].purpose,BusPurpose::InstructionFetch); assert_eq!(events[1].purpose,BusPurpose::Data);
     }
 
     #[test]
