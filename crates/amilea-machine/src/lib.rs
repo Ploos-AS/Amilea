@@ -4,7 +4,7 @@
 //! It is intentionally small while chipset devices are still being added.
 
 use amilea_bus::{
-    AddressSpace, BusClock, BusEvent, BusMaster, BusSignal, ObservedBus, OverlayBus, RamBus, Rom,
+    AddressSpace, BusClock, BusEvent, BusMaster, BusSignal, ObservedBus, OverlayBus, RamBus, RasterGeometry, RasterPosition, Rom,
 };
 use amilea_cia::CiaA;
 use amilea_chipset::{CustomChips, CUSTOM_BASE, CUSTOM_SIZE};
@@ -54,6 +54,7 @@ impl AmigaMachine {
     pub fn cycle(&self)->u64 { self.clock.cycle() }
     pub fn bus_trace(&self)->&[BusEvent] { &self.trace }
     pub fn clear_bus_trace(&mut self) { self.trace.clear(); }
+    pub fn raster_position(&self,cycle:u64)->RasterPosition { RasterGeometry::PAL_OCS.position(cycle) }
 }
 
 #[cfg(test)]
@@ -62,6 +63,16 @@ mod tests {
 
 
 
+
+
+    #[test]
+    fn trace_cycles_map_to_pal_raster_positions() {
+        let rom=vec![0u8;8];
+        let machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        let position=machine.raster_position(227*12+34);
+        assert_eq!(position.line,12);
+        assert_eq!(position.slot,34);
+    }
 
     #[test]
     fn machine_retains_ordered_cpu_bus_trace() {
