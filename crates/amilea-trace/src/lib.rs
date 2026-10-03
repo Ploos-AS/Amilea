@@ -2,6 +2,36 @@
 
 use amilea_bus::{BusAccess, BusEvent, BusMaster};
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterAccess { ReadOnly, WriteOnly, ReadWrite }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterInfo {
+    pub address:u32,
+    pub device:&'static str,
+    pub name:&'static str,
+    pub access:RegisterAccess,
+}
+
+const REGISTERS:&[RegisterInfo]=&[
+    RegisterInfo { address:0x00df_f002, device:"OCS", name:"DMACONR", access:RegisterAccess::ReadOnly },
+    RegisterInfo { address:0x00df_f004, device:"OCS", name:"VPOSR", access:RegisterAccess::ReadOnly },
+    RegisterInfo { address:0x00df_f006, device:"OCS", name:"VHPOSR", access:RegisterAccess::ReadOnly },
+    RegisterInfo { address:0x00df_f096, device:"OCS", name:"DMACON", access:RegisterAccess::WriteOnly },
+    RegisterInfo { address:0x00bf_e001, device:"CIA-A", name:"PRA", access:RegisterAccess::ReadWrite },
+    RegisterInfo { address:0x00bf_e201, device:"CIA-A", name:"DDRA", access:RegisterAccess::ReadWrite },
+];
+
+pub fn register_info(address:u32)->Option<&'static RegisterInfo> {
+    REGISTERS.iter().find(|register|register.address==address)
+}
+
+pub fn register_name(address:u32)->Option<&'static str> {
+    register_info(address).map(|register|register.name)
+}
+
+
 #[derive(Debug, Clone, Default)]
 pub struct BusQuery {
     pub cycle_start: Option<u64>,
@@ -58,6 +88,20 @@ mod tests {
             cycle, master:BusMaster::Cpu, purpose:BusPurpose::Data,
             access,address,size:1,value:Some(0x42),fault:None,
         }
+    }
+
+
+    #[test]
+    fn resolves_known_amiga_registers() {
+        let dmacon=register_info(0x00df_f096).unwrap();
+        assert_eq!(dmacon.device,"OCS");
+        assert_eq!(dmacon.name,"DMACON");
+        assert_eq!(dmacon.access,RegisterAccess::WriteOnly);
+
+        let cia=register_info(0x00bf_e001).unwrap();
+        assert_eq!(cia.device,"CIA-A");
+        assert_eq!(cia.name,"PRA");
+        assert!(register_info(0x0012_3456).is_none());
     }
 
     #[test]
