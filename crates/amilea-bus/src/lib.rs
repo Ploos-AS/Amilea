@@ -12,6 +12,28 @@ pub enum BusError {
     AddressError { address: u32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusAccess {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusEvent {
+    pub access: BusAccess,
+    pub address: u32,
+    pub size: u8,
+    pub value: u32,
+}
+
+pub trait BusObserver {
+    fn observe(&mut self, event: BusEvent);
+}
+
+impl<F: FnMut(BusEvent)> BusObserver for F {
+    fn observe(&mut self, event: BusEvent) { self(event); }
+}
+
 pub trait Bus {
     fn read8(&self, address: u32) -> Result<u8, BusError>;
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError>;
@@ -85,6 +107,49 @@ impl Bus for RamBus {
     }
 }
 
+pub struct ObservedBus<'a, B, O> {
+    inner: &'a mut B,
+    observer: &'a mut O,
+}
+
+impl<'a, B, O> ObservedBus<'a, B, O> {
+    pub fn new(inner: &'a mut B, observer: &'a mut O) -> Self {
+        Self { inner, observer }
+    }
+}
+
+impl<B: Bus, O: BusObserver> Bus for ObservedBus<'_, B, O> {
+    fn read8(&self, address: u32) -> Result<u8, BusError> {
+        self.inner.read8(address)
+    }
+
+    fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
+        self.inner.write8(address, value)?;
+        self.observer.observe(BusEvent { access: BusAccess::Write, address: mask(address), size: 1, value: value as u32 });
+        Ok(())
+    }
+
+    fn read16(&self, address: u32) -> Result<u16, BusError> {
+        self.inner.read16(address)
+    }
+
+    fn read32(&self, address: u32) -> Result<u32, BusError> {
+        self.inner.read32(address)
+    }
+
+    fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
+        self.inner.write16(address, value)?;
+        self.observer.observe(BusEvent { access: BusAccess::Write, address: mask(address), size: 2, value: value as u32 });
+        Ok(())
+    }
+
+    fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
+        self.inner.write32(address, value)?;
+        self.observer.observe(BusEvent { access: BusAccess::Write, address: mask(address), size: 4, value });
+        Ok(())
+    }
+}
+
 pub const fn mask(address: u32) -> u32 {
     address & ADDRESS_MASK
 }
@@ -100,6 +165,18 @@ fn require_even(address: u32) -> Result<(), BusError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_bus_reports_semantic_writes_once() {
+        let mut bus = RamBus::new(16);
+        let mut events = Vec::new();
+        {
+            let mut observed = ObservedBus::new(&mut bus, &mut |event| events.push(event));
+            observed.write32(2, 0x1234_abcd).unwrap();
+        }
+        assert_eq!(events, vec![BusEvent { access: BusAccess::Write, address: 2, size: 4, value: 0x1234_abcd }]);
+        assert_eq!(bus.read32(2).unwrap(), 0x1234_abcd);
+    }
 
     #[test]
     fn bus_is_big_endian() {
