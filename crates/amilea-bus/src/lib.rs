@@ -76,6 +76,8 @@ impl<F: FnMut(BusEvent)> BusObserver for F {
 }
 
 pub trait Bus {
+    fn set_purpose(&mut self, _purpose: BusPurpose) {}
+
     fn read8(&mut self, address: u32) -> Result<u8, BusError>;
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError>;
 
