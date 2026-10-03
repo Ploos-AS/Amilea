@@ -1,5 +1,6 @@
 //! Deterministic 24-bit Amiga bus primitives.
 
+use std::cell::Cell;
 use thiserror::Error;
 
 pub const ADDRESS_MASK: u32 = 0x00ff_ffff;
@@ -25,6 +26,16 @@ pub enum BusPurpose { Unspecified, InstructionFetch, Data, Stack, VectorFetch }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusFault { Unmapped, AddressError }
+
+#[derive(Debug, Default)]
+pub struct BusClock { cycle: Cell<u64> }
+
+impl BusClock {
+    pub const fn new(cycle: u64) -> Self { Self { cycle: Cell::new(cycle) } }
+    pub fn cycle(&self) -> u64 { self.cycle.get() }
+    pub fn set(&self, cycle: u64) { self.cycle.set(cycle); }
+    pub fn advance(&self, cycles: u64) { self.cycle.set(self.cycle.get().wrapping_add(cycles)); }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusTiming {
@@ -114,16 +125,20 @@ impl Bus for RamBus {
 }
 
 pub struct ObservedBus<'a,B,O> {
-    inner:&'a mut B, observer:&'a mut O, master:BusMaster, cycle:u64, timing:BusTiming, purpose:BusPurpose,
+    inner:&'a mut B, observer:&'a mut O, master:BusMaster, clock:BusClock, shared_clock:Option<&'a BusClock>, timing:BusTiming, purpose:BusPurpose,
 }
 impl<'a,B,O> ObservedBus<'a,B,O> {
     pub fn new(inner:&'a mut B, observer:&'a mut O, master:BusMaster, cycle:u64)->Self {
-        Self { inner, observer, master, cycle, timing: BusTiming::default(), purpose:BusPurpose::Unspecified }
+        Self { inner, observer, master, clock:BusClock::new(cycle), shared_clock:None, timing: BusTiming::default(), purpose:BusPurpose::Unspecified }
     }
-    pub fn set_cycle(&mut self, cycle:u64) { self.cycle=cycle; }
+    pub fn with_clock(inner:&'a mut B, observer:&'a mut O, master:BusMaster, clock:&'a BusClock)->Self {
+        Self { inner, observer, master, clock:BusClock::default(), shared_clock:Some(clock), timing:BusTiming::default(), purpose:BusPurpose::Unspecified }
+    }
+    fn current_cycle(&self)->u64 { self.shared_clock.map_or_else(|| self.clock.cycle(), BusClock::cycle) }
+    pub fn set_cycle(&mut self, cycle:u64) { if let Some(clock)=self.shared_clock { clock.set(cycle) } else { self.clock.set(cycle) } }
     pub fn set_cycle_step(&mut self, cycle_step:u64) { self.timing=BusTiming::Fixed(cycle_step); }
     pub fn set_timing(&mut self, timing:BusTiming) { self.timing=timing; }
-    fn advance_cycle(&mut self, size:u8) { self.cycle = self.cycle.wrapping_add(self.timing.cycles(size)); }
+    fn advance_cycle(&mut self, size:u8) { let n=self.timing.cycles(size); if let Some(clock)=self.shared_clock { clock.advance(n) } else { self.clock.advance(n) } }
     fn take_purpose(&mut self)->BusPurpose { std::mem::replace(&mut self.purpose, BusPurpose::Unspecified) }
 }
 impl<B:Bus,O:BusObserver> Bus for ObservedBus<'_,B,O> {
@@ -132,32 +147,32 @@ impl<B:Bus,O:BusObserver> Bus for ObservedBus<'_,B,O> {
     fn read8(&mut self,address:u32)->Result<u8,BusError>{
         let purpose=self.take_purpose(); let result=self.inner.read8(address);
         let (value,fault)=match &result { Ok(v)=>(Some(*v as u32),None), Err(e)=>(None,Some(e.into())) };
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:1,value,fault}); self.advance_cycle(1); result
+        self.observer.observe(BusEvent{cycle:self.current_cycle(),master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:1,value,fault}); self.advance_cycle(1); result
     }
     fn read16(&mut self,address:u32)->Result<u16,BusError>{
         let purpose=self.take_purpose(); let result=self.inner.read16(address);
         let (value,fault)=match &result { Ok(v)=>(Some(*v as u32),None), Err(e)=>(None,Some(e.into())) };
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:2,value,fault}); self.advance_cycle(2); result
+        self.observer.observe(BusEvent{cycle:self.current_cycle(),master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:2,value,fault}); self.advance_cycle(2); result
     }
     fn read32(&mut self,address:u32)->Result<u32,BusError>{
         let purpose=self.take_purpose(); let result=self.inner.read32(address);
         let (value,fault)=match &result { Ok(v)=>(Some(*v),None), Err(e)=>(None,Some(e.into())) };
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:4,value,fault}); self.advance_cycle(4); result
+        self.observer.observe(BusEvent{cycle:self.current_cycle(),master:self.master,purpose,access:BusAccess::Read,address:mask(address),size:4,value,fault}); self.advance_cycle(4); result
     }
     fn write8(&mut self,address:u32,value:u8)->Result<(),BusError>{
         let purpose=self.take_purpose(); let result=self.inner.write8(address,value);
         let fault=result.as_ref().err().map(Into::into);
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:1,value:Some(value as u32),fault}); self.advance_cycle(1); result
+        self.observer.observe(BusEvent{cycle:self.current_cycle(),master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:1,value:Some(value as u32),fault}); self.advance_cycle(1); result
     }
     fn write16(&mut self,address:u32,value:u16)->Result<(),BusError>{
         let purpose=self.take_purpose(); let result=self.inner.write16(address,value);
         let fault=result.as_ref().err().map(Into::into);
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:2,value:Some(value as u32),fault}); self.advance_cycle(2); result
+        self.observer.observe(BusEvent{cycle:self.current_cycle(),master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:2,value:Some(value as u32),fault}); self.advance_cycle(2); result
     }
     fn write32(&mut self,address:u32,value:u32)->Result<(),BusError>{
         let purpose=self.take_purpose(); let result=self.inner.write32(address,value);
         let fault=result.as_ref().err().map(Into::into);
-        self.observer.observe(BusEvent{cycle:self.cycle,master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:4,value:Some(value),fault}); self.advance_cycle(4); result
+        self.observer.observe(BusEvent{cycle:self.current_cycle(),master:self.master,purpose,access:BusAccess::Write,address:mask(address),size:4,value:Some(value),fault}); self.advance_cycle(4); result
     }
 }
 
@@ -227,6 +242,16 @@ mod tests {
           observed.set_timing(BusTiming::Width { byte: 1, word: 2, long: 4 });
           observed.read8(0).unwrap(); observed.read16(2).unwrap(); observed.read32(4).unwrap(); }
         assert_eq!(events.iter().map(|e| e.cycle).collect::<Vec<_>>(),vec![40,41,43]);
+    }
+
+    #[test]
+    fn masters_share_one_deterministic_clock() {
+        let clock=BusClock::new(200); let mut bus=RamBus::new(16); let mut events=Vec::new();
+        { let mut cpu=ObservedBus::with_clock(&mut bus,&mut |e| events.push(e),BusMaster::Cpu,&clock); cpu.read16(0).unwrap(); }
+        { let mut copper=ObservedBus::with_clock(&mut bus,&mut |e| events.push(e),BusMaster::Copper,&clock); copper.read16(2).unwrap(); }
+        assert_eq!(events[0].cycle,200); assert_eq!(events[0].master,BusMaster::Cpu);
+        assert_eq!(events[1].cycle,201); assert_eq!(events[1].master,BusMaster::Copper);
+        assert_eq!(clock.cycle(),202);
     }
 
     #[test]
