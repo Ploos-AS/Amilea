@@ -168,6 +168,21 @@ fn legal_movem_from_memory(mode: u8, reg: usize) -> bool {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuEvent {
+    Instruction { pc: u32, opcode: u16 },
+    Exception { vector: u8, pc: u32 },
+    AccessFault { vector: u8, pc: u32, opcode: u16, address: u32, read: bool, instruction_access: bool },
+}
+
+pub trait CpuObserver {
+    fn observe(&mut self, event: CpuEvent);
+}
+
+impl<F: FnMut(CpuEvent)> CpuObserver for F {
+    fn observe(&mut self, event: CpuEvent) { self(event); }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
     pub d: [u32; 8],
@@ -211,6 +226,10 @@ impl Cpu {
     }
 
     pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
+        self.step_observed(bus, &mut |_| {})
+    }
+
+    pub fn step_observed<B: Bus, O: CpuObserver>(&mut self, bus: &mut B, observer: &mut O) -> Result<u32, CpuError> {
         let instruction_pc = self.pc;
         let opcode = match bus.read16(self.pc) {
             Ok(opcode) => {
@@ -226,6 +245,8 @@ impl Cpu {
                 return Ok(50);
             }
         };
+
+        observer.observe(CpuEvent::Instruction { pc: instruction_pc, opcode });
 
         let result = match opcode {
             0x003c | 0x023c | 0x0a3c => {
@@ -1587,6 +1608,15 @@ mod tests {
         assert_eq!(cpu.a[7], 0x02f8);
         assert_eq!(bus.read32(0x2f8).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x2fc).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn observed_step_reports_instruction_deterministically() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        bus.write16(0x100, 0x4e71).unwrap();
+        let mut events = Vec::new();
+        cpu.step_observed(&mut bus, &mut |event| events.push(event)).unwrap();
+        assert_eq!(events, vec![CpuEvent::Instruction { pc: 0x100, opcode: 0x4e71 }]);
     }
 
     #[test]
