@@ -241,6 +241,8 @@ impl Cpu {
                     BusError::AddressError { address } => (3, address),
                     BusError::Unmapped { address } => (2, address),
                 };
+                observer.observe(CpuEvent::AccessFault { vector, pc: instruction_pc, opcode: 0, address, read: true, instruction_access: true });
+                observer.observe(CpuEvent::Exception { vector, pc: instruction_pc });
                 self.enter_access_fault(bus, vector, instruction_pc, 0, address, true, true)?;
                 return Ok(50);
             }
@@ -722,10 +724,13 @@ impl Cpu {
                     BusError::AddressError { address } => (3, address),
                     BusError::Unmapped { address } => (2, address),
                 };
+                observer.observe(CpuEvent::AccessFault { vector, pc: instruction_pc, opcode, address, read, instruction_access: false });
+                observer.observe(CpuEvent::Exception { vector, pc: instruction_pc });
                 self.enter_access_fault(bus, vector, instruction_pc, opcode, address, read, false)?;
                 Ok(50)
             }
             Err(CpuError::IllegalOpcode { .. }) => {
+                observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
                 self.enter_exception(bus, 4, instruction_pc)?;
                 Ok(34)
             }
@@ -1608,6 +1613,23 @@ mod tests {
         assert_eq!(cpu.a[7], 0x02f8);
         assert_eq!(bus.read32(0x2f8).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x2fc).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn observed_movem_address_error_reports_causal_event_chain() {
+        let mut bus = boot_bus();
+        bus.write32(3 * 4, 0x0000_0200).unwrap();
+        bus.write16(0x100, 0x4cd0).unwrap();
+        bus.write16(0x102, 0x0001).unwrap();
+        let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        cpu.a[0] = 0x0201;
+        let mut events = Vec::new();
+        cpu.step_observed(&mut bus, &mut |event| events.push(event)).unwrap();
+        assert_eq!(events, vec![
+            CpuEvent::Instruction { pc: 0x100, opcode: 0x4cd0 },
+            CpuEvent::AccessFault { vector: 3, pc: 0x100, opcode: 0x4cd0, address: 0x0201, read: true, instruction_access: false },
+            CpuEvent::Exception { vector: 3, pc: 0x100 },
+        ]);
     }
 
     #[test]
