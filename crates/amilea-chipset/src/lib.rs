@@ -1,7 +1,7 @@
 //! Amiga custom-chip register block.
 //! Functional Copper, Blitter, bitplane, sprite and audio DMA are added incrementally.
 
-use amilea_bus::{Bus, BusError};
+use amilea_bus::{Bus, BusClock, BusError, RasterGeometry};
 
 pub const CUSTOM_BASE:u32=0x00df_f000;
 pub const CUSTOM_SIZE:u32=0x200;
@@ -15,21 +15,24 @@ pub struct CustomChips {
     dmacon:u16,
     vpos:u16,
     vhpos:u16,
+    clock:Option<BusClock>,
 }
 
 impl Default for CustomChips {
-    fn default()->Self { Self { dmacon:0, vpos:0, vhpos:0 } }
+    fn default()->Self { Self { dmacon:0, vpos:0, vhpos:0, clock:None } }
 }
 
 impl CustomChips {
+    pub fn with_clock(clock:BusClock)->Self { Self { clock:Some(clock), ..Self::default() } }
     pub fn dmacon(&self)->u16 { self.dmacon }
     pub fn set_raster(&mut self,vpos:u16,vhpos:u16) { self.vpos=vpos; self.vhpos=vhpos; }
 
     fn read_reg(&self,address:u32)->Option<u16> {
+        let raster=self.clock.as_ref().map(|clock| RasterGeometry::PAL_OCS.position(clock.cycle()));
         match address {
             DMACONR=>Some(self.dmacon),
-            VPOSR=>Some(self.vpos),
-            VHPOSR=>Some(self.vhpos),
+            VPOSR=>Some(raster.map_or(self.vpos,|p|p.line)),
+            VHPOSR=>Some(raster.map_or(self.vhpos,|p|p.slot)),
             _=>None,
         }
     }
@@ -64,6 +67,15 @@ impl Bus for CustomChips {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_clock_drives_raster_registers() {
+        let clock=BusClock::new(0);
+        let mut chips=CustomChips::with_clock(clock.clone());
+        clock.set(227*12+34);
+        assert_eq!(chips.read16(VPOSR).unwrap(),12);
+        assert_eq!(chips.read16(VHPOSR).unwrap(),34);
+    }
 
     #[test]
     fn dmacon_uses_amiga_set_clear_semantics() {
