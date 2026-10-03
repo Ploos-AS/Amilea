@@ -1464,6 +1464,7 @@ impl Cpu {
     }
 
     fn read_mem<B: Bus>(&self, bus: &mut B, size: Size, address: u32) -> Result<u32, CpuError> {
+        bus.set_purpose(BusPurpose::Data);
         let result = match size {
             Size::Byte => bus.read8(address).map(|value| value as u32),
             Size::Word => bus.read16(address).map(|value| value as u32),
@@ -1473,6 +1474,7 @@ impl Cpu {
     }
 
     fn write_mem<B: Bus>(&self, bus: &mut B, size: Size, address: u32, value: u32) -> Result<(), CpuError> {
+        bus.set_purpose(BusPurpose::Data);
         let result = match size {
             Size::Byte => bus.write8(address, value as u8),
             Size::Word => bus.write16(address, value as u16),
