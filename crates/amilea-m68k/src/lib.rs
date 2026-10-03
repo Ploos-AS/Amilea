@@ -265,6 +265,7 @@ impl Cpu {
             }
             0x007c | 0x027c | 0x0a7c => {
                 if !self.supervisor() {
+                    observer.observe(CpuEvent::Exception { vector: 8, pc: instruction_pc });
                     self.enter_exception(bus, 8, instruction_pc)?;
                     return Ok(34);
                 }
@@ -299,6 +300,7 @@ impl Cpu {
             }
             0x46c0..=0x46ff => {
                 if !self.supervisor() {
+                    observer.observe(CpuEvent::Exception { vector: 8, pc: instruction_pc });
                     self.enter_exception(bus, 8, instruction_pc)?;
                     return Ok(34);
                 }
@@ -338,6 +340,7 @@ impl Cpu {
             }
             0x4e70 => {
                 if !self.supervisor() {
+                    observer.observe(CpuEvent::Exception { vector: 8, pc: instruction_pc });
                     self.enter_exception(bus, 8, instruction_pc)?;
                     return Ok(34);
                 }
@@ -345,6 +348,7 @@ impl Cpu {
             }
             0x4e76 => {
                 if self.sr & CCR_V != 0 {
+                    observer.observe(CpuEvent::Exception { vector: 7, pc: self.pc });
                     self.enter_exception(bus, 7, self.pc)?;
                     Ok(34)
                 } else {
@@ -361,6 +365,7 @@ impl Cpu {
                 let bound = self.read_ea(bus, Size::Word, mode, reg)? as u16 as i16 as i32;
                 let value = self.d[dn] as u16 as i16 as i32;
                 if value < 0 || value > bound {
+                    observer.observe(CpuEvent::Exception { vector: 6, pc: self.pc });
                     self.enter_exception(bus, 6, self.pc)?;
                     Ok(40)
                 } else {
@@ -386,6 +391,7 @@ impl Cpu {
                 let family = opcode & 0x0f00;
                 let size_bits = (opcode >> 6) & 3;
                 if size_bits == 3 {
+                    observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
                     self.enter_exception(bus, 4, instruction_pc)?;
                     return Ok(34);
                 }
@@ -410,7 +416,8 @@ impl Cpu {
                         return Ok(4);
                     }
                     _ => {
-                        self.enter_exception(bus, 4, instruction_pc)?;
+                        observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
+                    self.enter_exception(bus, 4, instruction_pc)?;
                         return Ok(34);
                     }
                 };
@@ -481,6 +488,7 @@ impl Cpu {
                     return Ok(4);
                 }
                 if opmode > 2 {
+                    observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
                     self.enter_exception(bus, 4, instruction_pc)?;
                     return Ok(34);
                 }
@@ -516,7 +524,8 @@ impl Cpu {
                 let dst_reg = ((opcode >> 9) & 7) as usize;
                 if dst_mode == 1 {
                     if size == Size::Byte {
-                        self.enter_exception(bus, 4, instruction_pc)?;
+                        observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
+                    self.enter_exception(bus, 4, instruction_pc)?;
                         return Ok(34);
                     }
                     let value = self.read_ea(bus, size, src_mode, src_reg)?;
@@ -528,6 +537,7 @@ impl Cpu {
                     return Ok(4);
                 }
                 if size == Size::Byte && src_mode == 1 {
+                    observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
                     self.enter_exception(bus, 4, instruction_pc)?;
                     return Ok(34);
                 }
@@ -602,6 +612,7 @@ impl Cpu {
             0x4e75 => { self.pc = self.pop32(bus)?; Ok(16) }
             0x4e60..=0x4e67 => {
                 if !self.supervisor() {
+                    observer.observe(CpuEvent::Exception { vector: 8, pc: instruction_pc });
                     self.enter_exception(bus, 8, instruction_pc)?;
                     return Ok(34);
                 }
@@ -611,6 +622,7 @@ impl Cpu {
             }
             0x4e68..=0x4e6f => {
                 if !self.supervisor() {
+                    observer.observe(CpuEvent::Exception { vector: 8, pc: instruction_pc });
                     self.enter_exception(bus, 8, instruction_pc)?;
                     return Ok(34);
                 }
@@ -620,6 +632,7 @@ impl Cpu {
             }
             0x4e73 => {
                 if !self.supervisor() {
+                    observer.observe(CpuEvent::Exception { vector: 8, pc: instruction_pc });
                     self.enter_exception(bus, 8, instruction_pc)?;
                     return Ok(34);
                 }
@@ -631,6 +644,7 @@ impl Cpu {
             }
             0x4e72 => {
                 if !self.supervisor() {
+                    observer.observe(CpuEvent::Exception { vector: 8, pc: instruction_pc });
                     self.enter_exception(bus, 8, instruction_pc)?;
                     return Ok(34);
                 }
@@ -641,6 +655,7 @@ impl Cpu {
             }
             0x4e40..=0x4e4f => {
                 let vector = 32 + (opcode & 0x000f) as u8;
+                observer.observe(CpuEvent::Exception { vector, pc: self.pc });
                 self.enter_exception(bus, vector, self.pc)?;
                 Ok(34)
             }
@@ -704,14 +719,17 @@ impl Cpu {
                 Ok(4)
             }
             0x4afc => {
-                self.enter_exception(bus, 4, instruction_pc)?;
+                observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
+                    self.enter_exception(bus, 4, instruction_pc)?;
                 Ok(34)
             }
             0xa000..=0xafff => {
+                observer.observe(CpuEvent::Exception { vector: 10, pc: instruction_pc });
                 self.enter_exception(bus, 10, instruction_pc)?;
                 Ok(34)
             }
             0xf000..=0xffff => {
+                observer.observe(CpuEvent::Exception { vector: 11, pc: instruction_pc });
                 self.enter_exception(bus, 11, instruction_pc)?;
                 Ok(34)
             }
@@ -731,7 +749,7 @@ impl Cpu {
             }
             Err(CpuError::IllegalOpcode { .. }) => {
                 observer.observe(CpuEvent::Exception { vector: 4, pc: instruction_pc });
-                self.enter_exception(bus, 4, instruction_pc)?;
+                    self.enter_exception(bus, 4, instruction_pc)?;
                 Ok(34)
             }
             other => other,
@@ -1613,6 +1631,19 @@ mod tests {
         assert_eq!(cpu.a[7], 0x02f8);
         assert_eq!(bus.read32(0x2f8).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x2fc).unwrap(), 0x5566_7788);
+    }
+
+    #[test]
+    fn observed_trap_reports_instruction_then_exception() {
+        let mut bus = boot_bus(); let mut cpu = Cpu::default(); cpu.reset(&bus).unwrap();
+        bus.write32(32 * 4, 0x0000_0200).unwrap();
+        bus.write16(0x100, 0x4e40).unwrap();
+        let mut events = Vec::new();
+        cpu.step_observed(&mut bus, &mut |event| events.push(event)).unwrap();
+        assert_eq!(events, vec![
+            CpuEvent::Instruction { pc: 0x100, opcode: 0x4e40 },
+            CpuEvent::Exception { vector: 32, pc: 0x102 },
+        ]);
     }
 
     #[test]
