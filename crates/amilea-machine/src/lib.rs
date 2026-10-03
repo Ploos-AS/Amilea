@@ -92,6 +92,9 @@ impl AmigaMachine {
     pub fn instruction_for_bus_event(&self,index:usize)->Option<&InstructionRecord> {
         self.instructions.iter().rev().find(|record|index>=record.bus_event_start && index<record.bus_event_end)
     }
+    pub fn bus_event_context(&self,index:usize)->Option<(&BusEvent,Option<&InstructionRecord>)> {
+        self.trace.get(index).map(|event|(event,self.instruction_for_bus_event(index)))
+    }
     pub fn raster_position(&self,cycle:u64)->RasterPosition { RasterGeometry::PAL_OCS.position(cycle) }
 }
 
