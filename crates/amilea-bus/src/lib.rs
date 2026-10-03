@@ -22,6 +22,24 @@ pub enum BusMaster {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotClass {
+    Dynamic,
+    Refresh,
+    Disk,
+    Audio(u8),
+    Sprite(u8),
+    Bitplane,
+    Copper,
+    Other(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassifiedSlot {
+    pub slot: BusSlot,
+    pub class: SlotClass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusSlot {
     Free,
     Reserved(BusMaster),
@@ -107,6 +125,22 @@ impl BusSchedule {
 
     pub fn slot(&self, cycle: u64) -> BusSlot {
         self.slots[(cycle % self.slots.len() as u64) as usize]
+    }
+
+    pub fn classified_slot(&self, cycle: u64) -> ClassifiedSlot {
+        let slot=self.slot(cycle);
+        let class=match slot {
+            BusSlot::Free => SlotClass::Dynamic,
+            BusSlot::Reserved(BusMaster::Refresh) => SlotClass::Refresh,
+            BusSlot::Reserved(BusMaster::Disk) => SlotClass::Disk,
+            BusSlot::Reserved(BusMaster::Audio(channel)) => SlotClass::Audio(channel),
+            BusSlot::Reserved(BusMaster::Sprite(sprite)) => SlotClass::Sprite(sprite),
+            BusSlot::Reserved(BusMaster::Bitplane) => SlotClass::Bitplane,
+            BusSlot::Reserved(BusMaster::Copper) => SlotClass::Copper,
+            BusSlot::Reserved(BusMaster::Other(id)) => SlotClass::Other(id),
+            BusSlot::Reserved(_) => SlotClass::Dynamic,
+        };
+        ClassifiedSlot { slot, class }
     }
 
     pub fn owner(&self, cycle: u64) -> Option<BusMaster> {
@@ -558,6 +592,25 @@ mod tests {
         let position=event.raster_position(RasterGeometry::PAL_OCS);
         assert_eq!(position,RasterPosition{frame:1,line:12,slot:34});
         assert_eq!(position.to_string(),"F1 L12 S34");
+    }
+
+    #[test]
+    fn schedule_classifies_slots_without_changing_ownership() {
+        let schedule=BusSchedule::from_slots(vec![
+            BusSlot::Reserved(BusMaster::Refresh),
+            BusSlot::Reserved(BusMaster::Audio(2)),
+            BusSlot::Reserved(BusMaster::Sprite(5)),
+            BusSlot::Reserved(BusMaster::Bitplane),
+            BusSlot::Reserved(BusMaster::Copper),
+            BusSlot::Free,
+        ]);
+        assert_eq!(schedule.classified_slot(0).class,SlotClass::Refresh);
+        assert_eq!(schedule.classified_slot(1).class,SlotClass::Audio(2));
+        assert_eq!(schedule.classified_slot(2).class,SlotClass::Sprite(5));
+        assert_eq!(schedule.classified_slot(3).class,SlotClass::Bitplane);
+        assert_eq!(schedule.classified_slot(4).class,SlotClass::Copper);
+        assert_eq!(schedule.classified_slot(5).class,SlotClass::Dynamic);
+        assert_eq!(schedule.owner(5),None);
     }
 
     #[test]
