@@ -71,6 +71,19 @@ impl BusArbiter {
     }
 
     pub fn pending(&self) -> &[BusMaster] { &self.pending }
+
+    pub fn grant_next(&mut self, schedule: &BusSchedule, clock: &BusClock) -> Option<BusMaster> {
+        if self.pending.is_empty() { return None; }
+        let start=clock.cycle();
+        for offset in 0..schedule.period() as u64 {
+            let cycle=start.wrapping_add(offset);
+            if let Some(winner)=self.grant(schedule,cycle) {
+                clock.set(cycle);
+                return Some(winner);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +447,33 @@ mod tests {
         assert_eq!(arbiter.grant(&schedule,0),None);
         assert!(arbiter.is_pending(BusMaster::Cpu));
         assert_eq!(arbiter.grant(&schedule,1),Some(BusMaster::Cpu));
+    }
+
+    #[test]
+    fn arbiter_grant_next_advances_clock_to_first_grantable_slot() {
+        let schedule=BusSchedule::from_slots(vec![
+            BusSlot::Reserved(BusMaster::Disk),
+            BusSlot::Reserved(BusMaster::Copper),
+            BusSlot::Free,
+            BusSlot::Reserved(BusMaster::Blitter),
+        ]);
+        let clock=BusClock::new(4);
+        let mut arbiter=BusArbiter::new(ArbitrationPolicy::cpu_first());
+        arbiter.request(BusMaster::Cpu);
+        assert_eq!(arbiter.grant_next(&schedule,&clock),Some(BusMaster::Cpu));
+        assert_eq!(clock.cycle(),6);
+        assert!(arbiter.pending().is_empty());
+    }
+
+    #[test]
+    fn arbiter_grant_next_does_not_move_clock_without_possible_grant() {
+        let schedule=BusSchedule::new(vec![BusMaster::Disk,BusMaster::Copper]);
+        let clock=BusClock::new(10);
+        let mut arbiter=BusArbiter::new(ArbitrationPolicy::cpu_first());
+        arbiter.request(BusMaster::Cpu);
+        assert_eq!(arbiter.grant_next(&schedule,&clock),None);
+        assert_eq!(clock.cycle(),10);
+        assert!(arbiter.is_pending(BusMaster::Cpu));
     }
 
     #[test]
