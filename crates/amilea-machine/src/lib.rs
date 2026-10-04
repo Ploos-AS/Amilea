@@ -20,6 +20,21 @@ pub struct InstructionRecord {
     pub bus_event_end:usize,
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptDisposition { Masked, Accepted }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptRecord {
+    pub cycle:u64,
+    pub pc:u32,
+    pub level:u8,
+    pub cpu_mask:u8,
+    pub pending:u16,
+    pub disposition:InterruptDisposition,
+    pub vector:Option<u8>,
+}
+
 pub struct AmigaMachine {
     pub cpu: Cpu,
     bus: OverlayBus<AddressSpace, Rom>,
@@ -28,6 +43,7 @@ pub struct AmigaMachine {
     trace: Vec<BusEvent>,
     instructions: Vec<InstructionRecord>,
     custom: CustomChipHandle,
+    interrupts: Vec<InterruptRecord>,
 }
 
 impl AmigaMachine {
@@ -51,6 +67,7 @@ impl AmigaMachine {
             trace:Vec::new(),
             instructions:Vec::new(),
             custom,
+            interrupts:Vec::new(),
         })
     }
 
@@ -63,10 +80,20 @@ impl AmigaMachine {
     pub fn step(&mut self)->Result<u32,CpuError> {
         let level=self.custom.interrupt_level();
         if level>0 {
+            let cycle=self.clock.cycle();
+            let pc=self.cpu.pc;
+            let cpu_mask=self.cpu.interrupt_mask();
+            let pending=self.custom.pending_interrupts();
             let trace=&mut self.trace;
             let mut observer=|event:BusEvent| trace.push(event);
             let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
-            if self.cpu.accept_interrupt(&mut bus,level)? { return Ok(0); }
+            let accepted=self.cpu.accept_interrupt(&mut bus,level)?;
+            self.interrupts.push(InterruptRecord {
+                cycle, pc, level, cpu_mask, pending,
+                disposition:if accepted { InterruptDisposition::Accepted } else { InterruptDisposition::Masked },
+                vector:accepted.then_some(24+level),
+            });
+            if accepted { return Ok(0); }
         }
         let pc=self.cpu.pc;
         let cycle_start=self.clock.cycle();
@@ -96,9 +123,11 @@ impl AmigaMachine {
     pub fn cycle(&self)->u64 { self.clock.cycle() }
     pub fn interrupt_level(&self)->u8 { self.custom.interrupt_level() }
     pub fn bus_trace(&self)->&[BusEvent] { &self.trace }
+    pub fn interrupt_trace(&self)->&[InterruptRecord] { &self.interrupts }
     pub fn clear_bus_trace(&mut self) {
         self.trace.clear();
         self.instructions.clear();
+        self.interrupts.clear();
     }
     pub fn instruction_trace(&self)->&[InstructionRecord] { &self.instructions }
     pub fn instruction_for_bus_event(&self,index:usize)->Option<&InstructionRecord> {
