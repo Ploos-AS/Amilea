@@ -564,7 +564,7 @@ impl AmigaMachine {
 
     pub fn why_register(&self,address:u32,cycle:u64)->Option<RegisterWriteExplanation> {
         let (bus_event_index,event)=self.trace.iter().enumerate().rev().find(|(_,event)| {
-            if event.cycle>cycle || event.value.is_none() { return false; }
+            if event.cycle>cycle || event.access!=BusAccess::Write || event.value.is_none() { return false; }
             let end=event.address.saturating_add(u32::from(event.size));
             event.address<=address && address<end
         })?;
@@ -822,6 +822,23 @@ mod tests {
         assert_eq!(outcome,RunOutcome::Limit(RunLimitReached::Instructions(2)));
         assert_eq!(machine.instruction_trace().len(),2);
         assert_eq!(machine.cpu.pc,0x00f8_000c);
+    }
+
+
+    #[test]
+    fn why_register_ignores_later_reads() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..16].copy_from_slice(&[0x33,0xfc,0x82,0x00,0x00,0xdf,0xf0,0x96]);
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        machine.step().unwrap();
+        let write_index=machine.bus_trace().iter().position(|event|event.address==DMACON && event.access==BusAccess::Write).unwrap();
+        let explanation=machine.why_register(DMACON,machine.cycle()).unwrap();
+        assert_eq!(explanation.bus_event_index,write_index);
+        assert_eq!(explanation.event.access,BusAccess::Write);
+        assert_eq!(explanation.event.value,Some(0x8200));
     }
 
 
