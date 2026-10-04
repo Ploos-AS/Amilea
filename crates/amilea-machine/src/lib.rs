@@ -65,6 +65,17 @@ pub struct TimelineExplanation {
 
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterWriteExplanation {
+    pub address:u32,
+    pub register:Option<&'static RegisterInfo>,
+    pub bus_event_index:usize,
+    pub event:BusEvent,
+    pub raster:RasterPosition,
+    pub instruction:Option<InstructionRecord>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterruptWriteCause {
     pub bus_event_index:usize,
@@ -269,6 +280,23 @@ impl AmigaMachine {
     }
 
 
+
+
+    pub fn why_register(&self,address:u32,cycle:u64)->Option<RegisterWriteExplanation> {
+        let (bus_event_index,event)=self.trace.iter().enumerate().rev().find(|(_,event)| {
+            if event.cycle>cycle || event.value.is_none() { return false; }
+            let end=event.address.saturating_add(u32::from(event.size));
+            event.address<=address && address<end
+        })?;
+        Some(RegisterWriteExplanation {
+            address,
+            register:register_info(address),
+            bus_event_index,
+            event:*event,
+            raster:self.raster_position(event.cycle),
+            instruction:self.instruction_for_bus_event(bus_event_index).copied(),
+        })
+    }
 
     pub fn why_interrupt(&self,index:usize)->Option<InterruptExplanation> {
         let interrupt=*self.interrupts.get(index)?;
