@@ -28,6 +28,17 @@ pub enum TimedEventKind { Interrupt(InterruptSource) }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimedEvent { pub cycle:u64, pub kind:TimedEventKind }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimedEventPhase { Scheduled, Dispatched }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimedEventRecord {
+    pub observed_cycle:u64,
+    pub event:TimedEvent,
+    pub phase:TimedEventPhase,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptDisposition { Masked, Accepted }
 
@@ -53,6 +64,7 @@ pub struct AmigaMachine {
     interrupts: Vec<InterruptRecord>,
     last_vblank_frame: Option<u64>,
     timed_events: Vec<TimedEvent>,
+    timed_event_trace: Vec<TimedEventRecord>,
 }
 
 impl AmigaMachine {
@@ -79,6 +91,7 @@ impl AmigaMachine {
             interrupts:Vec::new(),
             last_vblank_frame:None,
             timed_events:Vec::new(),
+            timed_event_trace:Vec::new(),
         })
     }
 
@@ -90,6 +103,9 @@ impl AmigaMachine {
     }
 
     fn schedule_timed_event(&mut self,event:TimedEvent) {
+        self.timed_event_trace.push(TimedEventRecord {
+            observed_cycle:self.clock.cycle(), event, phase:TimedEventPhase::Scheduled,
+        });
         let index=self.timed_events.partition_point(|queued|queued.cycle<=event.cycle);
         self.timed_events.insert(index,event);
     }
@@ -108,7 +124,11 @@ impl AmigaMachine {
     fn dispatch_timed_events(&mut self) {
         let now=self.clock.cycle();
         let ready=self.timed_events.partition_point(|event|event.cycle<=now);
-        for event in self.timed_events.drain(..ready) {
+        let events:Vec<_>=self.timed_events.drain(..ready).collect();
+        for event in events {
+            self.timed_event_trace.push(TimedEventRecord {
+                observed_cycle:now, event, phase:TimedEventPhase::Dispatched,
+            });
             match event.kind {
                 TimedEventKind::Interrupt(source)=>self.custom.request_interrupt(source),
             }
@@ -169,10 +189,12 @@ impl AmigaMachine {
     pub fn bus_trace(&self)->&[BusEvent] { &self.trace }
     pub fn interrupt_trace(&self)->&[InterruptRecord] { &self.interrupts }
     pub fn pending_timed_events(&self)->&[TimedEvent] { &self.timed_events }
+    pub fn timed_event_trace(&self)->&[TimedEventRecord] { &self.timed_event_trace }
     pub fn clear_bus_trace(&mut self) {
         self.trace.clear();
         self.instructions.clear();
         self.interrupts.clear();
+        self.timed_event_trace.clear();
     }
     pub fn instruction_trace(&self)->&[InstructionRecord] { &self.instructions }
     pub fn instruction_for_bus_event(&self,index:usize)->Option<&InstructionRecord> {
