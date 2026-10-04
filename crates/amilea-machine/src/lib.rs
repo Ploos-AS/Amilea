@@ -39,6 +39,18 @@ pub struct TimedEventRecord {
     pub phase:TimedEventPhase,
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineKind {
+    TimedEvent { index:usize, phase:TimedEventPhase },
+    Interrupt { index:usize, disposition:InterruptDisposition },
+    Instruction { index:usize, pc:u32, opcode:u16 },
+    Bus { index:usize, master:BusMaster },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineEntry { pub cycle:u64, pub kind:TimelineKind }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptDisposition { Masked, Accepted }
 
@@ -203,6 +215,29 @@ impl AmigaMachine {
     pub fn bus_event_context(&self,index:usize)->Option<(&BusEvent,Option<&InstructionRecord>)> {
         self.trace.get(index).map(|event|(event,self.instruction_for_bus_event(index)))
     }
+
+    pub fn timeline(&self)->Vec<TimelineEntry> {
+        let mut entries=Vec::new();
+        entries.extend(self.timed_event_trace.iter().enumerate().map(|(index,record)|TimelineEntry {
+            cycle:record.observed_cycle,
+            kind:TimelineKind::TimedEvent { index, phase:record.phase },
+        }));
+        entries.extend(self.interrupts.iter().enumerate().map(|(index,record)|TimelineEntry {
+            cycle:record.cycle,
+            kind:TimelineKind::Interrupt { index, disposition:record.disposition },
+        }));
+        entries.extend(self.instructions.iter().enumerate().map(|(index,record)|TimelineEntry {
+            cycle:record.cycle_start,
+            kind:TimelineKind::Instruction { index, pc:record.pc, opcode:record.opcode },
+        }));
+        entries.extend(self.trace.iter().enumerate().map(|(index,event)|TimelineEntry {
+            cycle:event.cycle,
+            kind:TimelineKind::Bus { index, master:event.master },
+        }));
+        entries.sort_by_key(|entry|entry.cycle);
+        entries
+    }
+
     pub fn raster_position(&self,cycle:u64)->RasterPosition { RasterGeometry::PAL_OCS.position(cycle) }
 }
 
