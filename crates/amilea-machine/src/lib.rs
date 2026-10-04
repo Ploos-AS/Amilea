@@ -75,6 +75,16 @@ pub enum DebugStopReason {
     ProgramCounter { address:u32 },
     Raster { frame:Option<u64>, line:u16, slot:u16 },
     Interrupt { level:u8, disposition:InterruptDisposition, pending:u16 },
+    CpuException { kind:CpuExceptionKind },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuExceptionKind {
+    Bus,
+    DataAccess,
+    IllegalOpcode,
+    UnimplementedOpcode,
+    Vector(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +99,7 @@ pub enum Breakpoint {
     ProgramCounter(u32),
     Raster { frame:Option<u64>, line:u16, slot:u16 },
     InterruptLevel { level:u8, accepted_only:bool },
+    CpuException,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,6 +384,22 @@ impl AmigaMachine {
             }
         }
         self.check_live_watchpoints(bus_event_start);
+        if let Err(ref error)=result {
+            let kind=match error {
+                CpuError::Bus(_)=>CpuExceptionKind::Bus,
+                CpuError::DataAccess { .. }=>CpuExceptionKind::DataAccess,
+                CpuError::IllegalOpcode { .. }=>CpuExceptionKind::IllegalOpcode,
+                CpuError::UnimplementedOpcode { .. }=>CpuExceptionKind::UnimplementedOpcode,
+                CpuError::Exception { vector, .. }=>CpuExceptionKind::Vector(*vector),
+            };
+            if self.debug_stop.is_none() && self.breakpoints.iter().any(|bp|matches!(bp,Breakpoint::CpuException)) {
+                self.debug_stop=Some(DebugStop {
+                    cycle:self.clock.cycle(),
+                    pc,
+                    reason:DebugStopReason::CpuException { kind },
+                });
+            }
+        }
         result
     }
     pub fn overlay_enabled(&self)->bool { self.overlay.get() }
