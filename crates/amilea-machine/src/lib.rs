@@ -209,6 +209,7 @@ pub struct AmigaMachine {
     watchpoints: Vec<RegisterWatchpoint>,
     debug_stop: Option<DebugStop>,
     breakpoints: Vec<Breakpoint>,
+    skip_breakpoint_once: Option<Breakpoint>,
 }
 
 impl AmigaMachine {
@@ -239,6 +240,7 @@ impl AmigaMachine {
             watchpoints:Vec::new(),
             debug_stop:None,
             breakpoints:Vec::new(),
+            skip_breakpoint_once:None,
         })
     }
 
@@ -255,7 +257,14 @@ impl AmigaMachine {
     }
     pub fn clear_breakpoints(&mut self) { self.breakpoints.clear(); self.debug_stop=None; }
     pub fn debug_stop(&self)->Option<DebugStop> { self.debug_stop }
-    pub fn resume(&mut self) { self.debug_stop=None; }
+    pub fn resume(&mut self) {
+        self.skip_breakpoint_once=self.debug_stop.and_then(|stop|match stop.reason {
+            DebugStopReason::ProgramCounter { address }=>Some(Breakpoint::ProgramCounter(address)),
+            DebugStopReason::Raster { frame,line,slot }=>Some(Breakpoint::Raster { frame,line,slot }),
+            _=>None,
+        });
+        self.debug_stop=None;
+    }
 
     fn check_live_watchpoints(&mut self,start:usize) {
         if self.debug_stop.is_some() { return; }
@@ -288,6 +297,7 @@ impl AmigaMachine {
         let pc=self.cpu.pc;
         let raster=self.raster_position(cycle);
         for breakpoint in &self.breakpoints {
+            if self.skip_breakpoint_once.as_ref()==Some(breakpoint) { continue; }
             let reason=match *breakpoint {
                 Breakpoint::ProgramCounter(address) if pc==address =>
                     Some(DebugStopReason::ProgramCounter { address }),
@@ -301,6 +311,7 @@ impl AmigaMachine {
                 return;
             }
         }
+        self.skip_breakpoint_once=None;
     }
 
     pub fn reset(&mut self)->Result<(),CpuError> {
@@ -839,6 +850,23 @@ mod tests {
         assert_eq!(explanation.bus_event_index,write_index);
         assert_eq!(explanation.event.access,BusAccess::Write);
         assert_eq!(explanation.event.value,Some(0x8200));
+    }
+
+
+    #[test]
+    fn resume_steps_past_current_pc_breakpoint_once() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..12].copy_from_slice(&[0x4e,0x71,0x4e,0x71]);
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        machine.add_breakpoint(Breakpoint::ProgramCounter(0x00f8_0008));
+        assert!(matches!(machine.run_until_stop(RunLimits::default()).unwrap(),RunOutcome::Stopped(_)));
+        machine.resume();
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.pc,0x00f8_000a);
+        assert!(machine.debug_stop().is_none());
     }
 
 
