@@ -765,4 +765,56 @@ mod tests {
         assert!(machine.overlay_enabled());
         assert_eq!(machine.step().unwrap(),4);
     }
+    #[test]
+    fn run_stops_before_pc_breakpoint_instruction() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..12].copy_from_slice(&[0x4e,0x71,0x4e,0x71]);
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        machine.add_breakpoint(Breakpoint::ProgramCounter(0x00f8_0008));
+        let outcome=machine.run_until_stop(RunLimits::default()).unwrap();
+        assert!(matches!(outcome,RunOutcome::Stopped(DebugStop {
+            pc:0x00f8_0008,
+            reason:DebugStopReason::ProgramCounter { address:0x00f8_0008 },
+            ..
+        })));
+        assert!(machine.instruction_trace().is_empty());
+    }
+
+    #[test]
+    fn live_watchpoint_stops_after_matching_register_write() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..16].copy_from_slice(&[0x33,0xfc,0x82,0x00,0x00,0xdf,0xf0,0x96]);
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        machine.add_watchpoint(RegisterWatchpoint::writes(0x00df_f096));
+        let outcome=machine.run_until_stop(RunLimits::default()).unwrap();
+        match outcome {
+            RunOutcome::Stopped(DebugStop { reason:DebugStopReason::RegisterWatchpoint { hit, .. }, .. }) => {
+                assert_eq!(hit.event.address,0x00df_f096);
+                assert_eq!(hit.event.master,BusMaster::Cpu);
+            }
+            other=>panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_instruction_limit_is_deterministic() {
+        let mut rom=vec![0u8;0x20];
+        rom[0..4].copy_from_slice(&0x0008_0000u32.to_be_bytes());
+        rom[4..8].copy_from_slice(&0x00f8_0008u32.to_be_bytes());
+        rom[8..14].copy_from_slice(&[0x4e,0x71,0x4e,0x71,0x4e,0x71]);
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.reset().unwrap();
+        let outcome=machine.run_until_stop(RunLimits { max_instructions:Some(2), max_cycles:None }).unwrap();
+        assert_eq!(outcome,RunOutcome::Limit(RunLimitReached::Instructions(2)));
+        assert_eq!(machine.instruction_trace().len(),2);
+        assert_eq!(machine.cpu.pc,0x00f8_000c);
+    }
+
+
 }
