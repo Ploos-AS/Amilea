@@ -128,6 +128,45 @@ pub fn register_name(address:u32)->Option<&'static str> {
 }
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterWrite {
+    pub event_index:usize,
+    pub cycle:u64,
+    pub address:u32,
+    pub value:u32,
+    pub previous_value:Option<u32>,
+    pub master:BusMaster,
+}
+
+pub fn register_history(events:&[BusEvent],address:u32,cycle_start:u64,cycle_end:u64)->Vec<RegisterWrite> {
+    let mut previous=None;
+    let mut writes=Vec::new();
+    for (event_index,event) in events.iter().enumerate() {
+        if event.cycle>cycle_end { continue; }
+        if event.access!=BusAccess::Write || event.address!=address || event.value.is_none() { continue; }
+        let value=event.value.unwrap();
+        if event.cycle>=cycle_start {
+            writes.push(RegisterWrite {
+                event_index,
+                cycle:event.cycle,
+                address,
+                value,
+                previous_value:previous,
+                master:event.master,
+            });
+        }
+        previous=Some(value);
+    }
+    writes
+}
+
+pub fn register_value_at(events:&[BusEvent],address:u32,cycle:u64)->Option<u32> {
+    events.iter().rev()
+        .find(|event|event.cycle<=cycle && event.access==BusAccess::Write && event.address==address)
+        .and_then(|event|event.value)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BusQuery {
     pub cycle_start: Option<u64>,
