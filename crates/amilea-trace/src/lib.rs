@@ -129,6 +129,44 @@ pub fn register_name(address:u32)->Option<&'static str> {
 
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchAccess { Read, Write, ReadWrite }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterWatchpoint {
+    pub address:u32,
+    pub access:WatchAccess,
+    pub master:Option<BusMaster>,
+    pub value_mask:Option<u32>,
+    pub value_equals:Option<u32>,
+}
+
+impl RegisterWatchpoint {
+    pub fn writes(address:u32)->Self {
+        Self { address, access:WatchAccess::Write, master:None, value_mask:None, value_equals:None }
+    }
+
+    pub fn matches(&self,event:&BusEvent)->bool {
+        if event.address!=self.address { return false; }
+        let access_matches=match self.access {
+            WatchAccess::Read=>event.access==BusAccess::Read,
+            WatchAccess::Write=>event.access==BusAccess::Write,
+            WatchAccess::ReadWrite=>true,
+        };
+        if !access_matches || self.master.map_or(false,|master|event.master!=master) { return false; }
+        match (self.value_mask,self.value_equals,event.value) {
+            (Some(mask),Some(expected),Some(value))=>(value&mask)==(expected&mask),
+            (None,None,_)=>true,
+            _=>false,
+        }
+    }
+}
+
+pub fn watchpoint_hits<'a>(events:&'a [BusEvent],watchpoint:&RegisterWatchpoint)->Vec<(usize,&'a BusEvent)> {
+    events.iter().enumerate().filter(|(_,event)|watchpoint.matches(event)).collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterWrite {
     pub event_index:usize,
