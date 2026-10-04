@@ -74,6 +74,7 @@ pub enum DebugStopReason {
     RegisterWatchpoint { watchpoint_index:usize, hit:WatchpointHit },
     ProgramCounter { address:u32 },
     Raster { frame:Option<u64>, line:u16, slot:u16 },
+    Interrupt { level:u8, disposition:InterruptDisposition, pending:u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,7 @@ pub struct DebugStop {
 pub enum Breakpoint {
     ProgramCounter(u32),
     Raster { frame:Option<u64>, line:u16, slot:u16 },
+    InterruptLevel { level:u8, accepted_only:bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,11 +327,26 @@ impl AmigaMachine {
             let mut observer=|event:BusEvent| trace.push(event);
             let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
             let accepted=self.cpu.accept_interrupt(&mut bus,level)?;
+            let disposition=if accepted { InterruptDisposition::Accepted } else { InterruptDisposition::Masked };
             self.interrupts.push(InterruptRecord {
                 cycle, pc, level, cpu_mask, pending,
-                disposition:if accepted { InterruptDisposition::Accepted } else { InterruptDisposition::Masked },
+                disposition,
                 vector:accepted.then_some(24+level),
             });
+            if self.debug_stop.is_none() {
+                for breakpoint in &self.breakpoints {
+                    if let Breakpoint::InterruptLevel { level:break_level, accepted_only }=*breakpoint {
+                        if break_level==level && (!accepted_only || accepted) {
+                            self.debug_stop=Some(DebugStop {
+                                cycle,
+                                pc,
+                                reason:DebugStopReason::Interrupt { level, disposition, pending },
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
             self.check_live_watchpoints(interrupt_event_start);
             if accepted { return Ok(0); }
         }
