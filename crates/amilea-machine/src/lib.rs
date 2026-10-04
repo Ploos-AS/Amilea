@@ -63,6 +63,14 @@ pub struct TimelineExplanation {
     pub timed_event:Option<TimedEventRecord>,
 }
 
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptExplanation {
+    pub interrupt:InterruptRecord,
+    pub sources:Vec<InterruptSource>,
+    pub causal_events:Vec<TimedEventRecord>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptDisposition { Masked, Accepted }
 
@@ -250,6 +258,27 @@ impl AmigaMachine {
         entries
     }
 
+
+
+    pub fn why_interrupt(&self,index:usize)->Option<InterruptExplanation> {
+        let interrupt=*self.interrupts.get(index)?;
+        let requests=self.custom.interrupt_requests();
+        let mut sources=Vec::new();
+        for request in requests {
+            if request.mask & interrupt.pending != 0 && !sources.contains(&request.source) {
+                sources.push(request.source);
+            }
+        }
+        let causal_events=self.timed_event_trace.iter()
+            .copied()
+            .filter(|record|record.observed_cycle<=interrupt.cycle)
+            .filter(|record|record.phase==TimedEventPhase::Dispatched)
+            .filter(|record|match record.event.kind {
+                TimedEventKind::Interrupt(source)=>sources.contains(&source),
+            })
+            .collect();
+        Some(InterruptExplanation { interrupt, sources, causal_events })
+    }
 
     pub fn explain_timeline_entry(&self,entry:TimelineEntry)->TimelineExplanation {
         let mut register=None;
