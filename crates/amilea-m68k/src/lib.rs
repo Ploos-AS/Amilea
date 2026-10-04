@@ -238,6 +238,17 @@ impl Cpu {
         Ok(())
     }
 
+    pub fn interrupt_mask(&self)->u8 { ((self.sr >> 8) & 7) as u8 }
+
+    pub fn accept_interrupt<B: Bus>(&mut self,bus:&mut B,level:u8)->Result<bool,CpuError> {
+        if level==0 || level>7 || level<=self.interrupt_mask() { return Ok(false); }
+        let saved_pc=self.pc;
+        self.stopped=false;
+        self.enter_exception(bus,24+level,saved_pc)?;
+        self.sr=(self.sr & !0x0700) | (u16::from(level)<<8);
+        Ok(true)
+    }
+
     pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
         self.step_observed(bus, &mut |_| {})
     }
@@ -1622,6 +1633,29 @@ fn add_displacement(pc: u32, displacement: i32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn interrupt_acceptance_respects_mask_and_uses_autovector() {
+        let mut bus=boot_bus();
+        bus.write32(27*4,0x360).unwrap();
+        let mut cpu=Cpu::default();
+        cpu.reset(&mut bus).unwrap();
+        cpu.sr=(cpu.sr & !0x0700)|0x0200;
+        let old_pc=cpu.pc;
+        let old_sp=cpu.a[7];
+
+        assert!(!cpu.accept_interrupt(&mut bus,2).unwrap());
+        assert_eq!(cpu.pc,old_pc);
+
+        assert!(cpu.accept_interrupt(&mut bus,3).unwrap());
+        assert_eq!(cpu.pc,0x360);
+        assert_eq!(cpu.interrupt_mask(),3);
+        assert_eq!(cpu.a[7],old_sp-6);
+        assert_eq!(bus.read16(cpu.a[7]).unwrap() & 0x0700,0x0200);
+        assert_eq!(bus.read32(cpu.a[7]+2).unwrap(),old_pc);
+    }
+
+
     use super::*;
     use amilea_bus::{BusAccess, BusEvent, BusMaster, BusPurpose, ObservedBus, RamBus};
 
