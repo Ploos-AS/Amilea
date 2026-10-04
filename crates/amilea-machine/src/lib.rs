@@ -9,7 +9,7 @@ use amilea_bus::{
 use amilea_cia::CiaA;
 use amilea_chipset::{CustomChipHandle, CustomChips, InterruptSource, INTREQ, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
-use amilea_trace::{register_info, RegisterInfo};
+use amilea_trace::{register_history, register_info, RegisterInfo, RegisterWrite};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstructionRecord {
@@ -281,6 +281,19 @@ impl AmigaMachine {
 
 
 
+
+
+    pub fn register_history(&self,address:u32,cycle_start:u64,cycle_end:u64)->Vec<RegisterWrite> {
+        register_history(&self.trace,address,cycle_start,cycle_end)
+    }
+
+    pub fn register_history_for_raster_line(&self,address:u32,frame:u64,line:u16)->Vec<RegisterWrite> {
+        let geometry=RasterGeometry::PAL_OCS;
+        let frame_cycles=u64::from(geometry.lines_per_frame)*u64::from(geometry.slots_per_line);
+        let start=frame*frame_cycles+u64::from(line)*u64::from(geometry.slots_per_line);
+        let end=start+u64::from(geometry.slots_per_line)-1;
+        self.register_history(address,start,end)
+    }
 
     pub fn why_register(&self,address:u32,cycle:u64)->Option<RegisterWriteExplanation> {
         let (bus_event_index,event)=self.trace.iter().enumerate().rev().find(|(_,event)| {
