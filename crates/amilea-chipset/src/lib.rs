@@ -2,6 +2,7 @@
 //! Functional Copper, Blitter, bitplane, sprite and audio DMA are added incrementally.
 
 use amilea_bus::{Bus, BusClock, BusError, RasterGeometry};
+use std::{cell::RefCell, rc::Rc};
 
 pub const CUSTOM_BASE:u32=0x00df_f000;
 pub const CUSTOM_SIZE:u32=0x200;
@@ -14,37 +15,51 @@ pub const DMACON:u32=CUSTOM_BASE+0x096;
 pub const INTENA:u32=CUSTOM_BASE+0x09a;
 pub const INTREQ:u32=CUSTOM_BASE+0x09c;
 
+#[derive(Debug,Default)]
+struct CustomState { dmacon:u16, intena:u16, intreq:u16, vpos:u16, vhpos:u16 }
+
+#[derive(Debug,Clone)]
+pub struct CustomChipHandle(Rc<RefCell<CustomState>>);
+
+impl CustomChipHandle {
+    pub fn dmacon(&self)->u16 { self.0.borrow().dmacon }
+    pub fn intena(&self)->u16 { self.0.borrow().intena }
+    pub fn intreq(&self)->u16 { self.0.borrow().intreq }
+    pub fn pending_interrupts(&self)->u16 {
+        let state=self.0.borrow();
+        if state.intena & 0x4000 != 0 { state.intena & state.intreq & 0x3fff } else { 0 }
+    }
+    pub fn interrupt_level(&self)->u8 { interrupt_level(self.pending_interrupts()) }
+}
+
 #[derive(Debug,Clone)]
 pub struct CustomChips {
-    dmacon:u16,
-    intena:u16,
-    intreq:u16,
-    vpos:u16,
-    vhpos:u16,
+    state:Rc<RefCell<CustomState>>,
     clock:Option<BusClock>,
 }
 
 impl Default for CustomChips {
-    fn default()->Self { Self { dmacon:0, intena:0, intreq:0, vpos:0, vhpos:0, clock:None } }
+    fn default()->Self { Self { state:Rc::new(RefCell::new(CustomState::default())), clock:None } }
 }
 
 impl CustomChips {
     pub fn with_clock(clock:BusClock)->Self { Self { clock:Some(clock), ..Self::default() } }
-    pub fn dmacon(&self)->u16 { self.dmacon }
-    pub fn intena(&self)->u16 { self.intena }
-    pub fn intreq(&self)->u16 { self.intreq }
-    pub fn pending_interrupts(&self)->u16 { if self.intena & 0x4000 != 0 { self.intena & self.intreq & 0x3fff } else { 0 } }
-    pub fn interrupt_level(&self)->u8 { interrupt_level(self.pending_interrupts()) }
-    pub fn set_raster(&mut self,vpos:u16,vhpos:u16) { self.vpos=vpos; self.vhpos=vhpos; }
+    pub fn handle(&self)->CustomChipHandle { CustomChipHandle(self.state.clone()) }
+    pub fn dmacon(&self)->u16 { self.state.borrow().dmacon }
+    pub fn intena(&self)->u16 { self.state.borrow().intena }
+    pub fn intreq(&self)->u16 { self.state.borrow().intreq }
+    pub fn pending_interrupts(&self)->u16 { self.handle().pending_interrupts() }
+    pub fn interrupt_level(&self)->u8 { self.handle().interrupt_level() }
+    pub fn set_raster(&mut self,vpos:u16,vhpos:u16) { let mut state=self.state.borrow_mut(); state.vpos=vpos; state.vhpos=vhpos; }
 
     fn read_reg(&self,address:u32)->Option<u16> {
         let raster=self.clock.as_ref().map(|clock| RasterGeometry::PAL_OCS.position(clock.cycle()));
         match address {
-            DMACONR=>Some(self.dmacon),
-            INTENAR=>Some(self.intena),
-            INTREQR=>Some(self.intreq),
-            VPOSR=>Some(raster.map_or(self.vpos,|p|p.line)),
-            VHPOSR=>Some(raster.map_or(self.vhpos,|p|p.slot)),
+            DMACONR=>Some(self.state.borrow().dmacon),
+            INTENAR=>Some(self.state.borrow().intena),
+            INTREQR=>Some(self.state.borrow().intreq),
+            VPOSR=>Some(raster.map_or(self.state.borrow().vpos,|p|p.line)),
+            VHPOSR=>Some(raster.map_or(self.state.borrow().vhpos,|p|p.slot)),
             _=>None,
         }
     }
@@ -53,17 +68,20 @@ impl CustomChips {
         match address {
             DMACON=>{
                 let bits=value & 0x7fff;
-                if value & 0x8000 != 0 { self.dmacon|=bits; } else { self.dmacon&=!bits; }
+                let mut state=self.state.borrow_mut();
+                if value & 0x8000 != 0 { state.dmacon|=bits; } else { state.dmacon&=!bits; }
                 true
             }
             INTENA=>{
                 let bits=value & 0x7fff;
-                if value & 0x8000 != 0 { self.intena|=bits; } else { self.intena&=!bits; }
+                let mut state=self.state.borrow_mut();
+                if value & 0x8000 != 0 { state.intena|=bits; } else { state.intena&=!bits; }
                 true
             }
             INTREQ=>{
                 let bits=value & 0x7fff;
-                if value & 0x8000 != 0 { self.intreq|=bits; } else { self.intreq&=!bits; }
+                let mut state=self.state.borrow_mut();
+                if value & 0x8000 != 0 { state.intreq|=bits; } else { state.intreq&=!bits; }
                 true
             }
             _=>false,
