@@ -8,29 +8,40 @@ pub const CUSTOM_SIZE:u32=0x200;
 pub const DMACONR:u32=CUSTOM_BASE+0x002;
 pub const VPOSR:u32=CUSTOM_BASE+0x004;
 pub const VHPOSR:u32=CUSTOM_BASE+0x006;
+pub const INTENAR:u32=CUSTOM_BASE+0x01c;
+pub const INTREQR:u32=CUSTOM_BASE+0x01e;
 pub const DMACON:u32=CUSTOM_BASE+0x096;
+pub const INTENA:u32=CUSTOM_BASE+0x09a;
+pub const INTREQ:u32=CUSTOM_BASE+0x09c;
 
 #[derive(Debug,Clone)]
 pub struct CustomChips {
     dmacon:u16,
+    intena:u16,
+    intreq:u16,
     vpos:u16,
     vhpos:u16,
     clock:Option<BusClock>,
 }
 
 impl Default for CustomChips {
-    fn default()->Self { Self { dmacon:0, vpos:0, vhpos:0, clock:None } }
+    fn default()->Self { Self { dmacon:0, intena:0, intreq:0, vpos:0, vhpos:0, clock:None } }
 }
 
 impl CustomChips {
     pub fn with_clock(clock:BusClock)->Self { Self { clock:Some(clock), ..Self::default() } }
     pub fn dmacon(&self)->u16 { self.dmacon }
+    pub fn intena(&self)->u16 { self.intena }
+    pub fn intreq(&self)->u16 { self.intreq }
+    pub fn pending_interrupts(&self)->u16 { if self.intena & 0x4000 != 0 { self.intena & self.intreq & 0x3fff } else { 0 } }
     pub fn set_raster(&mut self,vpos:u16,vhpos:u16) { self.vpos=vpos; self.vhpos=vhpos; }
 
     fn read_reg(&self,address:u32)->Option<u16> {
         let raster=self.clock.as_ref().map(|clock| RasterGeometry::PAL_OCS.position(clock.cycle()));
         match address {
             DMACONR=>Some(self.dmacon),
+            INTENAR=>Some(self.intena),
+            INTREQR=>Some(self.intreq),
             VPOSR=>Some(raster.map_or(self.vpos,|p|p.line)),
             VHPOSR=>Some(raster.map_or(self.vhpos,|p|p.slot)),
             _=>None,
@@ -42,6 +53,16 @@ impl CustomChips {
             DMACON=>{
                 let bits=value & 0x7fff;
                 if value & 0x8000 != 0 { self.dmacon|=bits; } else { self.dmacon&=!bits; }
+                true
+            }
+            INTENA=>{
+                let bits=value & 0x7fff;
+                if value & 0x8000 != 0 { self.intena|=bits; } else { self.intena&=!bits; }
+                true
+            }
+            INTREQ=>{
+                let bits=value & 0x7fff;
+                if value & 0x8000 != 0 { self.intreq|=bits; } else { self.intreq&=!bits; }
                 true
             }
             _=>false,
@@ -67,6 +88,20 @@ impl Bus for CustomChips {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn interrupt_state_uses_set_clear_semantics_and_master_gate() {
+        let mut chips=CustomChips::default();
+        chips.write16(INTENA,0xc060).unwrap();
+        assert_eq!(chips.read16(INTENAR).unwrap(),0x4060);
+        chips.write16(INTREQ,0x8060).unwrap();
+        assert_eq!(chips.read16(INTREQR).unwrap(),0x0060);
+        assert_eq!(chips.pending_interrupts(),0x0060);
+
+        chips.write16(INTENA,0x4000).unwrap();
+        assert_eq!(chips.pending_interrupts(),0);
+    }
 
     #[test]
     fn shared_clock_drives_raster_registers() {
