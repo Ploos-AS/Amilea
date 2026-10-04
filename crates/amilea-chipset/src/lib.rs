@@ -34,6 +34,7 @@ impl CustomChips {
     pub fn intena(&self)->u16 { self.intena }
     pub fn intreq(&self)->u16 { self.intreq }
     pub fn pending_interrupts(&self)->u16 { if self.intena & 0x4000 != 0 { self.intena & self.intreq & 0x3fff } else { 0 } }
+    pub fn interrupt_level(&self)->u8 { interrupt_level(self.pending_interrupts()) }
     pub fn set_raster(&mut self,vpos:u16,vhpos:u16) { self.vpos=vpos; self.vhpos=vhpos; }
 
     fn read_reg(&self,address:u32)->Option<u16> {
@@ -70,6 +71,17 @@ impl CustomChips {
     }
 }
 
+
+pub const fn interrupt_level(pending:u16)->u8 {
+    if pending & 0x2000 != 0 { 6 }
+    else if pending & 0x1800 != 0 { 5 }
+    else if pending & 0x0780 != 0 { 4 }
+    else if pending & 0x0070 != 0 { 3 }
+    else if pending & 0x0008 != 0 { 2 }
+    else if pending & 0x0007 != 0 { 1 }
+    else { 0 }
+}
+
 impl Bus for CustomChips {
     fn read8(&mut self,address:u32)->Result<u8,BusError> {
         let aligned=address & !1;
@@ -89,6 +101,19 @@ impl Bus for CustomChips {
 mod tests {
     use super::*;
 
+
+
+    #[test]
+    fn pending_sources_map_to_amiga_cpu_interrupt_levels() {
+        assert_eq!(interrupt_level(0x0001),1);
+        assert_eq!(interrupt_level(0x0008),2);
+        assert_eq!(interrupt_level(0x0010),3);
+        assert_eq!(interrupt_level(0x0080),4);
+        assert_eq!(interrupt_level(0x0800),5);
+        assert_eq!(interrupt_level(0x2000),6);
+        assert_eq!(interrupt_level(0),0);
+        assert_eq!(interrupt_level(0x2081),6);
+    }
 
     #[test]
     fn interrupt_state_uses_set_clear_semantics_and_master_gate() {
