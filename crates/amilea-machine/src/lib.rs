@@ -210,6 +210,7 @@ pub struct AmigaMachine {
     debug_stop: Option<DebugStop>,
     breakpoints: Vec<Breakpoint>,
     skip_breakpoint_once: Option<Breakpoint>,
+    last_breakpoint_cycle:u64,
 }
 
 impl AmigaMachine {
@@ -241,6 +242,7 @@ impl AmigaMachine {
             debug_stop:None,
             breakpoints:Vec::new(),
             skip_breakpoint_once:None,
+            last_breakpoint_cycle:0,
         })
     }
 
@@ -301,9 +303,30 @@ impl AmigaMachine {
             let reason=match *breakpoint {
                 Breakpoint::ProgramCounter(address) if pc==address =>
                     Some(DebugStopReason::ProgramCounter { address }),
-                Breakpoint::Raster { frame, line, slot }
-                    if raster.line==line && raster.slot==slot && frame.map_or(true,|f|f==raster.frame) =>
-                    Some(DebugStopReason::Raster { frame, line, slot }),
+                Breakpoint::Raster { frame, line, slot } => {
+                    let geometry=RasterGeometry::PAL_OCS;
+                    if line>=geometry.lines_per_frame || slot>=geometry.slots_per_line {
+                        None
+                    } else {
+                        let offset=u64::from(line)*u64::from(geometry.slots_per_line)+u64::from(slot);
+                        let per_frame=geometry.slots_per_frame();
+                        let crossed=match frame {
+                            Some(target_frame) => {
+                                let target=target_frame.saturating_mul(per_frame).saturating_add(offset);
+                                self.last_breakpoint_cycle<target && target<=cycle
+                            }
+                            None => {
+                                let first_frame=self.last_breakpoint_cycle/per_frame;
+                                let last_frame=cycle/per_frame;
+                                (first_frame..=last_frame).any(|f| {
+                                    let target=f.saturating_mul(per_frame).saturating_add(offset);
+                                    self.last_breakpoint_cycle<target && target<=cycle
+                                })
+                            }
+                        };
+                        crossed.then_some(DebugStopReason::Raster { frame, line, slot })
+                    }
+                },
                 _=>None,
             };
             if let Some(reason)=reason {
@@ -312,6 +335,7 @@ impl AmigaMachine {
             }
         }
         self.skip_breakpoint_once=None;
+        self.last_breakpoint_cycle=cycle;
     }
 
     pub fn reset(&mut self)->Result<(),CpuError> {
