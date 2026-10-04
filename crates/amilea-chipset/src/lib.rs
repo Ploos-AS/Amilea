@@ -19,7 +19,7 @@ pub const INTREQ:u32=CUSTOM_BASE+0x09c;
 pub enum InterruptSource { External, DiskSync, SerialReceive, Audio3, Audio2, Audio1, Audio0, Blitter, VerticalBlank, Copper, Ports, Soft, DiskBlock, TransmitBufferEmpty }
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub struct InterruptRequest { pub source:InterruptSource, pub mask:u16 }
+pub struct InterruptRequest { pub source:InterruptSource, pub mask:u16, pub cycle:u64 }
 
 #[derive(Debug,Default)]
 struct CustomState { dmacon:u16, intena:u16, intreq:u16, vpos:u16, vhpos:u16, requests:Vec<InterruptRequest> }
@@ -37,7 +37,8 @@ impl CustomChipHandle {
     }
     pub fn interrupt_level(&self)->u8 { interrupt_level(self.pending_interrupts()) }
     pub fn interrupt_requests(&self)->Vec<InterruptRequest> { self.0.borrow().requests.clone() }
-    pub fn request_interrupt(&self,source:InterruptSource) { let mask=interrupt_source_mask(source); let mut state=self.0.borrow_mut(); state.intreq|=mask; state.requests.push(InterruptRequest{source,mask}); }
+    pub fn request_interrupt(&self,source:InterruptSource) { self.request_interrupt_at(source,0); }
+    pub fn request_interrupt_at(&self,source:InterruptSource,cycle:u64) { let mask=interrupt_source_mask(source); let mut state=self.0.borrow_mut(); state.intreq|=mask; state.requests.push(InterruptRequest{source,mask,cycle}); }
 }
 
 #[derive(Debug,Clone)]
@@ -221,7 +222,7 @@ mod tests {
         let handle=chips.handle();
         handle.request_interrupt(InterruptSource::Soft);
         assert_eq!(handle.intreq(),0x0004);
-        assert_eq!(handle.interrupt_requests(),vec![InterruptRequest { source:InterruptSource::Soft, mask:0x0004 }]);
+        assert_eq!(handle.interrupt_requests(),vec![InterruptRequest { source:InterruptSource::Soft, mask:0x0004, cycle:0 }]);
     }
 
 
