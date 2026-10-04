@@ -7,7 +7,7 @@ use amilea_bus::{
     AddressSpace, BusClock, BusEvent, BusMaster, BusSignal, ObservedBus, OverlayBus, RamBus, RasterGeometry, RasterPosition, Rom,
 };
 use amilea_cia::CiaA;
-use amilea_chipset::{CustomChipHandle, CustomChips, InterruptSource, CUSTOM_BASE, CUSTOM_SIZE};
+use amilea_chipset::{CustomChipHandle, CustomChips, InterruptSource, INTREQ, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
 use amilea_trace::{register_info, RegisterInfo};
 
@@ -64,11 +64,21 @@ pub struct TimelineExplanation {
 }
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptWriteCause {
+    pub bus_event_index:usize,
+    pub cycle:u64,
+    pub value:u16,
+    pub instruction:Option<InstructionRecord>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterruptExplanation {
     pub interrupt:InterruptRecord,
     pub sources:Vec<InterruptSource>,
     pub causal_events:Vec<TimedEventRecord>,
+    pub register_writes:Vec<InterruptWriteCause>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,7 +287,20 @@ impl AmigaMachine {
                 TimedEventKind::Interrupt(source)=>sources.contains(&source),
             })
             .collect();
-        Some(InterruptExplanation { interrupt, sources, causal_events })
+        let register_writes=self.trace.iter().enumerate()
+            .filter(|(_,event)|event.cycle<=interrupt.cycle && event.address==INTREQ && event.size==2)
+            .filter_map(|(bus_event_index,event)| {
+                let value=event.value? as u16;
+                if value & 0x8000==0 || value & interrupt.pending==0 { return None; }
+                Some(InterruptWriteCause {
+                    bus_event_index,
+                    cycle:event.cycle,
+                    value,
+                    instruction:self.instruction_for_bus_event(bus_event_index).copied(),
+                })
+            })
+            .collect();
+        Some(InterruptExplanation { interrupt, sources, causal_events, register_writes })
     }
 
     pub fn explain_timeline_entry(&self,entry:TimelineEntry)->TimelineExplanation {
