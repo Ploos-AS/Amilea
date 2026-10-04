@@ -68,6 +68,13 @@ pub struct TimelineExplanation {
 
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugStop {
+    pub watchpoint_index:usize,
+    pub hit:WatchpointHit,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchpointHit {
     pub bus_event_index:usize,
@@ -147,6 +154,8 @@ pub struct AmigaMachine {
     last_vblank_frame: Option<u64>,
     timed_events: Vec<TimedEvent>,
     timed_event_trace: Vec<TimedEventRecord>,
+    watchpoints: Vec<RegisterWatchpoint>,
+    debug_stop: Option<DebugStop>,
 }
 
 impl AmigaMachine {
@@ -174,7 +183,41 @@ impl AmigaMachine {
             last_vblank_frame:None,
             timed_events:Vec::new(),
             timed_event_trace:Vec::new(),
+            watchpoints:Vec::new(),
+            debug_stop:None,
         })
+    }
+
+
+    pub fn add_watchpoint(&mut self,watchpoint:RegisterWatchpoint)->usize {
+        self.watchpoints.push(watchpoint);
+        self.watchpoints.len()-1
+    }
+
+    pub fn clear_watchpoints(&mut self) { self.watchpoints.clear(); self.debug_stop=None; }
+    pub fn debug_stop(&self)->Option<DebugStop> { self.debug_stop }
+    pub fn resume(&mut self) { self.debug_stop=None; }
+
+    fn check_live_watchpoints(&mut self,start:usize) {
+        if self.debug_stop.is_some() { return; }
+        for bus_event_index in start..self.trace.len() {
+            let event=self.trace[bus_event_index];
+            for (watchpoint_index,watchpoint) in self.watchpoints.iter().enumerate() {
+                if watchpoint.matches(&event) {
+                    self.debug_stop=Some(DebugStop {
+                        watchpoint_index,
+                        hit:WatchpointHit {
+                            bus_event_index,
+                            event,
+                            raster:self.raster_position(event.cycle),
+                            register:register_info(event.address),
+                            instruction:self.instruction_for_bus_event(bus_event_index).copied(),
+                        },
+                    });
+                    return;
+                }
+            }
+        }
     }
 
     pub fn reset(&mut self)->Result<(),CpuError> {
@@ -230,6 +273,7 @@ impl AmigaMachine {
             let pc=self.cpu.pc;
             let cpu_mask=self.cpu.interrupt_mask();
             let pending=self.custom.pending_interrupts();
+            let interrupt_event_start=self.trace.len();
             let trace=&mut self.trace;
             let mut observer=|event:BusEvent| trace.push(event);
             let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
@@ -239,6 +283,7 @@ impl AmigaMachine {
                 disposition:if accepted { InterruptDisposition::Accepted } else { InterruptDisposition::Masked },
                 vector:accepted.then_some(24+level),
             });
+            self.check_live_watchpoints(interrupt_event_start);
             if accepted { return Ok(0); }
         }
         let pc=self.cpu.pc;
@@ -263,6 +308,7 @@ impl AmigaMachine {
                 }
             }
         }
+        self.check_live_watchpoints(bus_event_start);
         result
     }
     pub fn overlay_enabled(&self)->bool { self.overlay.get() }
