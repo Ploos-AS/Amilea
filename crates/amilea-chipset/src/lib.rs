@@ -15,8 +15,14 @@ pub const DMACON:u32=CUSTOM_BASE+0x096;
 pub const INTENA:u32=CUSTOM_BASE+0x09a;
 pub const INTREQ:u32=CUSTOM_BASE+0x09c;
 
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum InterruptSource { Software, External, DiskSync, SerialReceive, Audio3, Audio2, Audio1, Audio0, Blitter, VerticalBlank, Copper, Ports, Soft, DiskBlock, TransmitBufferEmpty }
+
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct InterruptRequest { pub source:InterruptSource, pub mask:u16 }
+
 #[derive(Debug,Default)]
-struct CustomState { dmacon:u16, intena:u16, intreq:u16, vpos:u16, vhpos:u16 }
+struct CustomState { dmacon:u16, intena:u16, intreq:u16, vpos:u16, vhpos:u16, requests:Vec<InterruptRequest> }
 
 #[derive(Debug,Clone)]
 pub struct CustomChipHandle(Rc<RefCell<CustomState>>);
@@ -30,6 +36,8 @@ impl CustomChipHandle {
         if state.intena & 0x4000 != 0 { state.intena & state.intreq & 0x3fff } else { 0 }
     }
     pub fn interrupt_level(&self)->u8 { interrupt_level(self.pending_interrupts()) }
+    pub fn interrupt_requests(&self)->Vec<InterruptRequest> { self.0.borrow().requests.clone() }
+    pub fn request_interrupt(&self,source:InterruptSource) { let mask=interrupt_source_mask(source); let mut state=self.0.borrow_mut(); state.intreq|=mask; state.requests.push(InterruptRequest{source,mask}); }
 }
 
 #[derive(Debug,Clone)]
@@ -89,6 +97,20 @@ impl CustomChips {
     }
 }
 
+
+
+pub const fn interrupt_source_mask(source:InterruptSource)->u16 {
+    match source {
+        InterruptSource::External=>0x2000, InterruptSource::DiskSync=>0x1000,
+        InterruptSource::SerialReceive=>0x0800, InterruptSource::Audio3=>0x0400,
+        InterruptSource::Audio2=>0x0200, InterruptSource::Audio1=>0x0100,
+        InterruptSource::Audio0=>0x0080, InterruptSource::Blitter=>0x0040,
+        InterruptSource::VerticalBlank=>0x0020, InterruptSource::Copper=>0x0010,
+        InterruptSource::Ports=>0x0008, InterruptSource::Soft=>0x0004,
+        InterruptSource::DiskBlock=>0x0002, InterruptSource::TransmitBufferEmpty=>0x0001,
+        InterruptSource::Software=>0,
+    }
+}
 
 pub const fn interrupt_level(pending:u16)->u8 {
     if pending & 0x2000 != 0 { 6 }
