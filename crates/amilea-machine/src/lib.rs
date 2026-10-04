@@ -9,6 +9,7 @@ use amilea_bus::{
 use amilea_cia::CiaA;
 use amilea_chipset::{CustomChipHandle, CustomChips, InterruptSource, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
+use amilea_trace::{register_info, RegisterInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstructionRecord {
@@ -50,6 +51,17 @@ pub enum TimelineKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineEntry { pub cycle:u64, pub kind:TimelineKind }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineExplanation {
+    pub entry:TimelineEntry,
+    pub raster:RasterPosition,
+    pub register:Option<&'static RegisterInfo>,
+    pub instruction:Option<InstructionRecord>,
+    pub interrupt:Option<InterruptRecord>,
+    pub timed_event:Option<TimedEventRecord>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptDisposition { Masked, Accepted }
@@ -236,6 +248,39 @@ impl AmigaMachine {
         }));
         entries.sort_by_key(|entry|entry.cycle);
         entries
+    }
+
+
+    pub fn explain_timeline_entry(&self,entry:TimelineEntry)->TimelineExplanation {
+        let mut register=None;
+        let mut instruction=None;
+        let mut interrupt=None;
+        let mut timed_event=None;
+        match entry.kind {
+            TimelineKind::Bus { index, .. } => {
+                if let Some(event)=self.trace.get(index) {
+                    register=register_info(event.address);
+                    instruction=self.instruction_for_bus_event(index).copied();
+                }
+            }
+            TimelineKind::Instruction { index, .. } => {
+                instruction=self.instructions.get(index).copied();
+            }
+            TimelineKind::Interrupt { index, .. } => {
+                interrupt=self.interrupts.get(index).copied();
+            }
+            TimelineKind::TimedEvent { index, .. } => {
+                timed_event=self.timed_event_trace.get(index).copied();
+            }
+        }
+        TimelineExplanation {
+            entry,
+            raster:self.raster_position(entry.cycle),
+            register,
+            instruction,
+            interrupt,
+            timed_event,
+        }
     }
 
     pub fn raster_position(&self,cycle:u64)->RasterPosition { RasterGeometry::PAL_OCS.position(cycle) }
