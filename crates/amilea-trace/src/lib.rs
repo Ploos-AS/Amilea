@@ -175,6 +175,7 @@ pub enum SetClearOperation { Clear, Set }
 pub struct DecodedRegisterValue {
     pub operation:Option<SetClearOperation>,
     pub fields:Vec<&'static str>,
+    pub values:Vec<(&'static str,u32)>,
 }
 
 const DMACON_BITS:&[(u16,&str)]=&[
@@ -221,7 +222,7 @@ pub fn decode_register_value(register:&RegisterInfo,value:u32)->DecodedRegisterV
         let fields=DMACON_BITS.iter()
             .filter_map(|(mask,name)|(word & mask != 0).then_some(*name))
             .collect();
-        DecodedRegisterValue { operation, fields }
+        DecodedRegisterValue { operation, fields, values:Vec::new() }
     } else if matches!(register.name,"INTENA"|"INTENAR"|"INTREQ"|"INTREQR") {
         let word=value as u16;
         let operation=matches!(register.name,"INTENA"|"INTREQ").then_some(
@@ -230,9 +231,48 @@ pub fn decode_register_value(register:&RegisterInfo,value:u32)->DecodedRegisterV
         let fields=INTERRUPT_BITS.iter()
             .filter_map(|(mask,name)|(word & mask != 0).then_some(*name))
             .collect();
-        DecodedRegisterValue { operation, fields }
+        DecodedRegisterValue { operation, fields, values:Vec::new() }
     } else {
-        DecodedRegisterValue { operation:None, fields:Vec::new() }
+        match register.name {
+            "BPLCON0" => {
+                let word=value as u16;
+                let mut fields=Vec::new();
+                if word&0x8000!=0 { fields.push("HIRES"); }
+                if word&0x0800!=0 { fields.push("HAM"); }
+                if word&0x0400!=0 { fields.push("DBLPF"); }
+                if word&0x0200!=0 { fields.push("COLOR"); }
+                if word&0x0100!=0 { fields.push("GAUD"); }
+                if word&0x0008!=0 { fields.push("LPEN"); }
+                if word&0x0004!=0 { fields.push("LACE"); }
+                if word&0x0002!=0 { fields.push("ERSY"); }
+                DecodedRegisterValue { operation:None, fields, values:vec![("BPU",u32::from((word>>12)&7))] }
+            }
+            "BPLCON1" => {
+                let word=value as u16;
+                DecodedRegisterValue { operation:None, fields:Vec::new(), values:vec![
+                    ("PF1H",u32::from(word&0x000f)),
+                    ("PF2H",u32::from((word>>4)&0x000f)),
+                ] }
+            }
+            "BPLCON2" => {
+                let word=value as u16;
+                let fields=if word&0x0040!=0 { vec!["PF2PRI"] } else { Vec::new() };
+                DecodedRegisterValue { operation:None, fields, values:vec![
+                    ("PF1P",u32::from(word&7)),
+                    ("PF2P",u32::from((word>>3)&7)),
+                ] }
+            }
+            "DIWSTRT"|"DIWSTOP" => {
+                let word=value as u16;
+                DecodedRegisterValue { operation:None, fields:Vec::new(), values:vec![
+                    ("V",u32::from((word>>8)&0xff)),("H",u32::from(word&0xff)),
+                ] }
+            }
+            "DDFSTRT"|"DDFSTOP" => DecodedRegisterValue {
+                operation:None, fields:Vec::new(), values:vec![("H",value&0x00fc)],
+            },
+            _ => DecodedRegisterValue { operation:None, fields:Vec::new(), values:Vec::new() },
+        }
     }
 }
 
