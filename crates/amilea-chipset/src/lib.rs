@@ -135,6 +135,16 @@ impl Bus for CustomChips {
         let word=if address & 1 == 0 { (u16::from(value)<<8)|(old&0xff) } else { (old&0xff00)|u16::from(value) };
         if self.write_reg(aligned,word) { Ok(()) } else { Err(BusError::Unmapped{address}) }
     }
+
+    fn read16(&mut self,address:u32)->Result<u16,BusError> {
+        if address & 1 != 0 { return Err(BusError::AddressError{address}); }
+        self.read_reg(address).ok_or(BusError::Unmapped{address})
+    }
+
+    fn write16(&mut self,address:u32,value:u16)->Result<(),BusError> {
+        if address & 1 != 0 { return Err(BusError::AddressError{address}); }
+        if self.write_reg(address,value) { Ok(()) } else { Err(BusError::Unmapped{address}) }
+    }
 }
 
 #[cfg(test)]
@@ -193,4 +203,16 @@ mod tests {
         assert_eq!(chips.read16(VPOSR).unwrap(),0x1234);
         assert_eq!(chips.read16(VHPOSR).unwrap(),0x5678);
     }
+    #[test]
+    fn word_writes_apply_set_clear_atomically() {
+        let mut chips=CustomChips::default();
+        chips.write16(DMACON,0x8001).unwrap();
+        assert_eq!(chips.dmacon(),0x0001);
+        chips.write16(INTENA,0xc001).unwrap();
+        assert_eq!(chips.intena(),0x4001);
+        chips.write16(INTREQ,0x8001).unwrap();
+        assert_eq!(chips.intreq(),0x0001);
+    }
+
+
 }
