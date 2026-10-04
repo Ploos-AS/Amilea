@@ -894,4 +894,56 @@ mod tests {
     }
 
 
+    #[test]
+    fn raster_breakpoint_detects_slot_crossed_between_boundaries() {
+        let rom=vec![0u8;8];
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        machine.clock.set(44);
+        machine.last_breakpoint_cycle=40;
+        machine.add_breakpoint(Breakpoint::Raster { frame:Some(0), line:0, slot:42 });
+        machine.check_breakpoints();
+        assert!(matches!(machine.debug_stop(),Some(DebugStop {
+            reason:DebugStopReason::Raster { frame:Some(0), line:0, slot:42 },
+            ..
+        })));
+    }
+
+    #[test]
+    fn raster_breakpoint_detects_target_across_frame_boundary() {
+        let rom=vec![0u8;8];
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        let per_frame=RasterGeometry::PAL_OCS.slots_per_frame();
+        machine.last_breakpoint_cycle=per_frame-2;
+        machine.clock.set(per_frame+3);
+        machine.add_breakpoint(Breakpoint::Raster { frame:Some(1), line:0, slot:1 });
+        machine.check_breakpoints();
+        assert!(matches!(machine.debug_stop(),Some(DebugStop {
+            reason:DebugStopReason::Raster { frame:Some(1), line:0, slot:1 },
+            ..
+        })));
+    }
+
+    #[test]
+    fn recurring_raster_breakpoint_can_fire_again_next_frame() {
+        let rom=vec![0u8;8];
+        let mut machine=AmigaMachine::a500_with_rom(rom).unwrap();
+        let per_frame=RasterGeometry::PAL_OCS.slots_per_frame();
+        machine.add_breakpoint(Breakpoint::Raster { frame:None, line:0, slot:5 });
+
+        machine.last_breakpoint_cycle=1;
+        machine.clock.set(6);
+        machine.check_breakpoints();
+        assert!(machine.debug_stop().is_some());
+
+        machine.resume();
+        machine.last_breakpoint_cycle=6;
+        machine.clock.set(per_frame+6);
+        machine.check_breakpoints();
+        assert!(matches!(machine.debug_stop(),Some(DebugStop {
+            reason:DebugStopReason::Raster { frame:None, line:0, slot:5 },
+            ..
+        })));
+    }
+
+
 }
