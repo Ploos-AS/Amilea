@@ -338,7 +338,7 @@ impl AmigaMachine {
                 observed_cycle:now, event, phase:TimedEventPhase::Dispatched,
             });
             match event.kind {
-                TimedEventKind::Interrupt(source)=>self.custom.request_interrupt(source),
+                TimedEventKind::Interrupt(source)=>self.custom.request_interrupt_at(source,self.clock.cycle()),
             }
         }
     }
@@ -583,7 +583,15 @@ impl AmigaMachine {
         let requests=self.custom.interrupt_requests();
         let mut sources=Vec::new();
         for request in requests {
-            if request.mask & interrupt.pending != 0 && !sources.contains(&request.source) {
+            if request.cycle>interrupt.cycle || request.mask & interrupt.pending==0 { continue; }
+            let cleared_after_request=self.trace.iter().any(|event| {
+                if event.cycle<request.cycle || event.cycle>interrupt.cycle || event.address!=INTREQ || event.size!=2 {
+                    return false;
+                }
+                let Some(value)=event.value else { return false; };
+                value & 0x8000==0 && (value as u16) & request.mask!=0
+            });
+            if !cleared_after_request && !sources.contains(&request.source) {
                 sources.push(request.source);
             }
         }
