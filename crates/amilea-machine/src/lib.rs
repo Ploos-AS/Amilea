@@ -69,6 +69,31 @@ pub struct TimelineExplanation {
 
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunLimits {
+    pub max_instructions:Option<u64>,
+    pub max_cycles:Option<u64>,
+}
+
+impl Default for RunLimits {
+    fn default()->Self {
+        Self { max_instructions:Some(1_000_000), max_cycles:None }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunLimitReached {
+    Instructions(u64),
+    Cycles(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Stopped(DebugStop),
+    Limit(RunLimitReached),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugStopReason {
     RegisterWatchpoint { watchpoint_index:usize, hit:WatchpointHit },
@@ -321,6 +346,34 @@ impl AmigaMachine {
     fn update_timed_events(&mut self) {
         self.produce_raster_events();
         self.dispatch_timed_events();
+    }
+
+
+    pub fn run_until_stop(&mut self,limits:RunLimits)->Result<RunOutcome,CpuError> {
+        let start_cycle=self.clock.cycle();
+        let mut instructions=0u64;
+        loop {
+            if let Some(stop)=self.debug_stop {
+                return Ok(RunOutcome::Stopped(stop));
+            }
+            if let Some(max)=limits.max_instructions {
+                if instructions>=max {
+                    return Ok(RunOutcome::Limit(RunLimitReached::Instructions(instructions)));
+                }
+            }
+            if let Some(max)=limits.max_cycles {
+                let elapsed=self.clock.cycle().saturating_sub(start_cycle);
+                if elapsed>=max {
+                    return Ok(RunOutcome::Limit(RunLimitReached::Cycles(elapsed)));
+                }
+            }
+            let before=self.instructions.len();
+            self.step()?;
+            instructions+=u64::from(self.instructions.len()>before);
+            if let Some(stop)=self.debug_stop {
+                return Ok(RunOutcome::Stopped(stop));
+            }
+        }
     }
 
     pub fn step(&mut self)->Result<u32,CpuError> {
