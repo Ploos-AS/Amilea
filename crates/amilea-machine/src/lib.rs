@@ -7,7 +7,7 @@ use amilea_bus::{
     AddressSpace, BusClock, BusEvent, BusMaster, BusSignal, ObservedBus, OverlayBus, RamBus, RasterGeometry, RasterPosition, Rom,
 };
 use amilea_cia::CiaA;
-use amilea_chipset::{CustomChipHandle, CustomChips, CUSTOM_BASE, CUSTOM_SIZE};
+use amilea_chipset::{CustomChipHandle, CustomChips, InterruptSource, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +44,7 @@ pub struct AmigaMachine {
     instructions: Vec<InstructionRecord>,
     custom: CustomChipHandle,
     interrupts: Vec<InterruptRecord>,
+    last_vblank_frame: Option<u64>,
 }
 
 impl AmigaMachine {
@@ -68,6 +69,7 @@ impl AmigaMachine {
             instructions:Vec::new(),
             custom,
             interrupts:Vec::new(),
+            last_vblank_frame:None,
         })
     }
 
@@ -77,7 +79,17 @@ impl AmigaMachine {
         let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
         self.cpu.reset(&mut bus)
     }
+
+    fn update_timed_events(&mut self) {
+        let position=RasterGeometry::PAL_OCS.position(self.clock.cycle());
+        if position.line==0 && self.last_vblank_frame!=Some(position.frame) {
+            self.custom.request_interrupt(InterruptSource::VerticalBlank);
+            self.last_vblank_frame=Some(position.frame);
+        }
+    }
+
     pub fn step(&mut self)->Result<u32,CpuError> {
+        self.update_timed_events();
         let level=self.custom.interrupt_level();
         if level>0 {
             let cycle=self.clock.cycle();
