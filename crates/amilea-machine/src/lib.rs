@@ -21,6 +21,13 @@ pub struct InstructionRecord {
 }
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimedEventKind { Interrupt(InterruptSource) }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimedEvent { pub cycle:u64, pub kind:TimedEventKind }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptDisposition { Masked, Accepted }
 
@@ -45,6 +52,7 @@ pub struct AmigaMachine {
     custom: CustomChipHandle,
     interrupts: Vec<InterruptRecord>,
     last_vblank_frame: Option<u64>,
+    timed_events: Vec<TimedEvent>,
 }
 
 impl AmigaMachine {
@@ -70,6 +78,7 @@ impl AmigaMachine {
             custom,
             interrupts:Vec::new(),
             last_vblank_frame:None,
+            timed_events:Vec::new(),
         })
     }
 
@@ -80,12 +89,35 @@ impl AmigaMachine {
         self.cpu.reset(&mut bus)
     }
 
-    fn update_timed_events(&mut self) {
+    fn schedule_timed_event(&mut self,event:TimedEvent) {
+        let index=self.timed_events.partition_point(|queued|queued.cycle<=event.cycle);
+        self.timed_events.insert(index,event);
+    }
+
+    fn produce_raster_events(&mut self) {
         let position=RasterGeometry::PAL_OCS.position(self.clock.cycle());
         if position.line==0 && self.last_vblank_frame!=Some(position.frame) {
-            self.custom.request_interrupt(InterruptSource::VerticalBlank);
+            self.schedule_timed_event(TimedEvent {
+                cycle:self.clock.cycle(),
+                kind:TimedEventKind::Interrupt(InterruptSource::VerticalBlank),
+            });
             self.last_vblank_frame=Some(position.frame);
         }
+    }
+
+    fn dispatch_timed_events(&mut self) {
+        let now=self.clock.cycle();
+        let ready=self.timed_events.partition_point(|event|event.cycle<=now);
+        for event in self.timed_events.drain(..ready) {
+            match event.kind {
+                TimedEventKind::Interrupt(source)=>self.custom.request_interrupt(source),
+            }
+        }
+    }
+
+    fn update_timed_events(&mut self) {
+        self.produce_raster_events();
+        self.dispatch_timed_events();
     }
 
     pub fn step(&mut self)->Result<u32,CpuError> {
@@ -136,6 +168,7 @@ impl AmigaMachine {
     pub fn interrupt_level(&self)->u8 { self.custom.interrupt_level() }
     pub fn bus_trace(&self)->&[BusEvent] { &self.trace }
     pub fn interrupt_trace(&self)->&[InterruptRecord] { &self.interrupts }
+    pub fn pending_timed_events(&self)->&[TimedEvent] { &self.timed_events }
     pub fn clear_bus_trace(&mut self) {
         self.trace.clear();
         self.instructions.clear();
