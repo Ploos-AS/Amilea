@@ -9,7 +9,7 @@ use amilea_bus::{
 use amilea_cia::CiaA;
 use amilea_chipset::{CustomChipHandle, CustomChips, InterruptSource, INTREQ, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
-use amilea_trace::{register_history, register_info, RegisterInfo, RegisterWrite};
+use amilea_trace::{register_history, register_info, watchpoint_hits, RegisterInfo, RegisterWatchpoint, RegisterWrite};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstructionRecord {
@@ -66,6 +66,16 @@ pub struct TimelineExplanation {
 
 
 
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchpointHit {
+    pub bus_event_index:usize,
+    pub event:BusEvent,
+    pub raster:RasterPosition,
+    pub register:Option<&'static RegisterInfo>,
+    pub instruction:Option<InstructionRecord>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RasterRegisterWrite {
@@ -302,6 +312,17 @@ impl AmigaMachine {
 
 
 
+
+
+    pub fn watchpoint_hits(&self,watchpoint:&RegisterWatchpoint)->Vec<WatchpointHit> {
+        watchpoint_hits(&self.trace,watchpoint).into_iter().map(|(bus_event_index,event)| WatchpointHit {
+            bus_event_index,
+            event:*event,
+            raster:self.raster_position(event.cycle),
+            register:register_info(event.address),
+            instruction:self.instruction_for_bus_event(bus_event_index).copied(),
+        }).collect()
+    }
 
     pub fn inspect_raster_line(&self,frame:u64,line:u16)->RasterLineInspection {
         let geometry=RasterGeometry::PAL_OCS;
