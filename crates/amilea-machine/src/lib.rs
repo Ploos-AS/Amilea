@@ -66,6 +66,25 @@ pub struct TimelineExplanation {
 
 
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterRegisterWrite {
+    pub slot:u16,
+    pub bus_event_index:usize,
+    pub register:&'static RegisterInfo,
+    pub previous_value:Option<u32>,
+    pub value:u32,
+    pub master:BusMaster,
+    pub instruction:Option<InstructionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterLineInspection {
+    pub frame:u64,
+    pub line:u16,
+    pub writes:Vec<RasterRegisterWrite>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterWriteExplanation {
     pub address:u32,
@@ -282,6 +301,43 @@ impl AmigaMachine {
 
 
 
+
+
+    pub fn inspect_raster_line(&self,frame:u64,line:u16)->RasterLineInspection {
+        let geometry=RasterGeometry::PAL_OCS;
+        if line>=geometry.lines_per_frame {
+            return RasterLineInspection { frame, line, writes:Vec::new() };
+        }
+        let frame_cycles=u64::from(geometry.lines_per_frame)*u64::from(geometry.slots_per_line);
+        let start=frame*frame_cycles+u64::from(line)*u64::from(geometry.slots_per_line);
+        let end=start+u64::from(geometry.slots_per_line)-1;
+        let mut last_values=std::collections::HashMap::<u32,u32>::new();
+        for event in &self.trace {
+            if event.cycle>=start { break; }
+            if event.access==BusAccess::Write {
+                if let (Some(_),Some(value))=(register_info(event.address),event.value) {
+                    last_values.insert(event.address,value);
+                }
+            }
+        }
+        let mut writes=Vec::new();
+        for (bus_event_index,event) in self.trace.iter().enumerate() {
+            if event.cycle<start || event.cycle>end || event.access!=BusAccess::Write { continue; }
+            let Some(register)=register_info(event.address) else { continue; };
+            let Some(value)=event.value else { continue; };
+            let previous_value=last_values.insert(event.address,value);
+            writes.push(RasterRegisterWrite {
+                slot:(event.cycle-start) as u16,
+                bus_event_index,
+                register,
+                previous_value,
+                value,
+                master:event.master,
+                instruction:self.instruction_for_bus_event(bus_event_index).copied(),
+            });
+        }
+        RasterLineInspection { frame, line, writes }
+    }
 
     pub fn register_history(&self,address:u32,cycle_start:u64,cycle_end:u64)->Vec<RegisterWrite> {
         register_history(&self.trace,address,cycle_start,cycle_end)
