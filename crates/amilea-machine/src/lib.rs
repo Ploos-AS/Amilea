@@ -423,7 +423,7 @@ impl AmigaMachine {
                 }
             }
             self.check_live_watchpoints(interrupt_event_start);
-            if accepted { return Ok(0); }
+            if self.debug_stop.is_some() || accepted { return Ok(0); }
         }
         let pc=self.cpu.pc;
         let cycle_start=self.clock.cycle();
