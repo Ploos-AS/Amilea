@@ -70,9 +70,23 @@ pub struct TimelineExplanation {
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugStopReason {
+    RegisterWatchpoint { watchpoint_index:usize, hit:WatchpointHit },
+    ProgramCounter { address:u32 },
+    Raster { frame:Option<u64>, line:u16, slot:u16 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DebugStop {
-    pub watchpoint_index:usize,
-    pub hit:WatchpointHit,
+    pub cycle:u64,
+    pub pc:u32,
+    pub reason:DebugStopReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Breakpoint {
+    ProgramCounter(u32),
+    Raster { frame:Option<u64>, line:u16, slot:u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +170,7 @@ pub struct AmigaMachine {
     timed_event_trace: Vec<TimedEventRecord>,
     watchpoints: Vec<RegisterWatchpoint>,
     debug_stop: Option<DebugStop>,
+    breakpoints: Vec<Breakpoint>,
 }
 
 impl AmigaMachine {
@@ -185,6 +200,7 @@ impl AmigaMachine {
             timed_event_trace:Vec::new(),
             watchpoints:Vec::new(),
             debug_stop:None,
+            breakpoints:Vec::new(),
         })
     }
 
@@ -195,6 +211,11 @@ impl AmigaMachine {
     }
 
     pub fn clear_watchpoints(&mut self) { self.watchpoints.clear(); self.debug_stop=None; }
+    pub fn add_breakpoint(&mut self,breakpoint:Breakpoint)->usize {
+        self.breakpoints.push(breakpoint);
+        self.breakpoints.len()-1
+    }
+    pub fn clear_breakpoints(&mut self) { self.breakpoints.clear(); self.debug_stop=None; }
     pub fn debug_stop(&self)->Option<DebugStop> { self.debug_stop }
     pub fn resume(&mut self) { self.debug_stop=None; }
 
@@ -204,18 +225,42 @@ impl AmigaMachine {
             let event=self.trace[bus_event_index];
             for (watchpoint_index,watchpoint) in self.watchpoints.iter().enumerate() {
                 if watchpoint.matches(&event) {
+                    let hit=WatchpointHit {
+                        bus_event_index,
+                        event,
+                        raster:self.raster_position(event.cycle),
+                        register:register_info(event.address),
+                        instruction:self.instruction_for_bus_event(bus_event_index).copied(),
+                    };
                     self.debug_stop=Some(DebugStop {
-                        watchpoint_index,
-                        hit:WatchpointHit {
-                            bus_event_index,
-                            event,
-                            raster:self.raster_position(event.cycle),
-                            register:register_info(event.address),
-                            instruction:self.instruction_for_bus_event(bus_event_index).copied(),
-                        },
+                        cycle:event.cycle,
+                        pc:self.cpu.pc,
+                        reason:DebugStopReason::RegisterWatchpoint { watchpoint_index, hit },
                     });
                     return;
                 }
+            }
+        }
+    }
+
+
+    fn check_breakpoints(&mut self) {
+        if self.debug_stop.is_some() { return; }
+        let cycle=self.clock.cycle();
+        let pc=self.cpu.pc;
+        let raster=self.raster_position(cycle);
+        for breakpoint in &self.breakpoints {
+            let reason=match *breakpoint {
+                Breakpoint::ProgramCounter(address) if pc==address =>
+                    Some(DebugStopReason::ProgramCounter { address }),
+                Breakpoint::Raster { frame, line, slot }
+                    if raster.line==line && raster.slot==slot && frame.map_or(true,|f|f==raster.frame) =>
+                    Some(DebugStopReason::Raster { frame, line, slot }),
+                _=>None,
+            };
+            if let Some(reason)=reason {
+                self.debug_stop=Some(DebugStop { cycle, pc, reason });
+                return;
             }
         }
     }
@@ -266,6 +311,8 @@ impl AmigaMachine {
     }
 
     pub fn step(&mut self)->Result<u32,CpuError> {
+        self.check_breakpoints();
+        if self.debug_stop.is_some() { return Ok(0); }
         self.update_timed_events();
         let level=self.custom.interrupt_level();
         if level>0 {
