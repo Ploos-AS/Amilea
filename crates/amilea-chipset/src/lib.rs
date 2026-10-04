@@ -16,7 +16,7 @@ pub const INTENA:u32=CUSTOM_BASE+0x09a;
 pub const INTREQ:u32=CUSTOM_BASE+0x09c;
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum InterruptSource { Software, External, DiskSync, SerialReceive, Audio3, Audio2, Audio1, Audio0, Blitter, VerticalBlank, Copper, Ports, Soft, DiskBlock, TransmitBufferEmpty }
+pub enum InterruptSource { External, DiskSync, SerialReceive, Audio3, Audio2, Audio1, Audio0, Blitter, VerticalBlank, Copper, Ports, Soft, DiskBlock, TransmitBufferEmpty }
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub struct InterruptRequest { pub source:InterruptSource, pub mask:u16 }
@@ -108,7 +108,6 @@ pub const fn interrupt_source_mask(source:InterruptSource)->u16 {
         InterruptSource::VerticalBlank=>0x0020, InterruptSource::Copper=>0x0010,
         InterruptSource::Ports=>0x0008, InterruptSource::Soft=>0x0004,
         InterruptSource::DiskBlock=>0x0002, InterruptSource::TransmitBufferEmpty=>0x0001,
-        InterruptSource::Software=>0,
     }
 }
 
@@ -212,6 +211,17 @@ mod tests {
         assert_eq!(chips.intena(),0x4001);
         chips.write16(INTREQ,0x8001).unwrap();
         assert_eq!(chips.intreq(),0x0001);
+    }
+
+
+    #[test]
+    fn soft_interrupt_source_maps_to_intreq_soft_bit() {
+        assert_eq!(interrupt_source_mask(InterruptSource::Soft),0x0004);
+        let chips=CustomChips::default();
+        let handle=chips.handle();
+        handle.request_interrupt(InterruptSource::Soft);
+        assert_eq!(handle.intreq(),0x0004);
+        assert_eq!(handle.interrupt_requests(),vec![InterruptRequest { source:InterruptSource::Soft, mask:0x0004 }]);
     }
 
 
