@@ -7,7 +7,7 @@ use amilea_bus::{
     AddressSpace, BusClock, BusEvent, BusMaster, BusSignal, ObservedBus, OverlayBus, RamBus, RasterGeometry, RasterPosition, Rom,
 };
 use amilea_cia::CiaA;
-use amilea_chipset::{CustomChips, CUSTOM_BASE, CUSTOM_SIZE};
+use amilea_chipset::{CustomChipHandle, CustomChips, CUSTOM_BASE, CUSTOM_SIZE};
 use amilea_m68k::{Cpu, CpuError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +27,7 @@ pub struct AmigaMachine {
     clock: BusClock,
     trace: Vec<BusEvent>,
     instructions: Vec<InstructionRecord>,
+    custom: CustomChipHandle,
 }
 
 impl AmigaMachine {
@@ -37,7 +38,9 @@ impl AmigaMachine {
         let mut base=AddressSpace::new();
         base.map(0x000000,0x080000,RamBus::new(0x080000))?;
         base.map(0xbfe000,0x300,CiaA::with_overlay_signal(overlay.clone()))?;
-        base.map(CUSTOM_BASE,CUSTOM_SIZE,CustomChips::with_clock(clock.clone()))?;
+        let custom_device=CustomChips::with_clock(clock.clone());
+        let custom=custom_device.handle();
+        base.map(CUSTOM_BASE,CUSTOM_SIZE,custom_device)?;
         base.map(0xf80000,rom.len() as u32,Rom::new(0xf80000,rom.clone()))?;
         let overlay_rom=Rom::new(0,rom);
         Ok(Self {
@@ -47,6 +50,7 @@ impl AmigaMachine {
             clock,
             trace:Vec::new(),
             instructions:Vec::new(),
+            custom,
         })
     }
 
@@ -57,6 +61,13 @@ impl AmigaMachine {
         self.cpu.reset(&mut bus)
     }
     pub fn step(&mut self)->Result<u32,CpuError> {
+        let level=self.custom.interrupt_level();
+        if level>0 {
+            let trace=&mut self.trace;
+            let mut observer=|event:BusEvent| trace.push(event);
+            let mut bus=ObservedBus::with_clock(&mut self.bus,&mut observer,BusMaster::Cpu,&self.clock);
+            if self.cpu.accept_interrupt(&mut bus,level)? { return Ok(0); }
+        }
         let pc=self.cpu.pc;
         let cycle_start=self.clock.cycle();
         let bus_event_start=self.trace.len();
@@ -83,6 +94,7 @@ impl AmigaMachine {
     }
     pub fn overlay_enabled(&self)->bool { self.overlay.get() }
     pub fn cycle(&self)->u64 { self.clock.cycle() }
+    pub fn interrupt_level(&self)->u8 { self.custom.interrupt_level() }
     pub fn bus_trace(&self)->&[BusEvent] { &self.trace }
     pub fn clear_bus_trace(&mut self) {
         self.trace.clear();
